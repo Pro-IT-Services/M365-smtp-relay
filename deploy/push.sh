@@ -1,31 +1,43 @@
 #!/bin/bash
-# Build Graph Relay and deploy it to a host, from a workstation (Git Bash, Linux or macOS).
-#   CONFIG=path/to/config.yaml deploy/push.sh root@relay.example.com
-# CONFIG is copied to the host only if it has no /opt/graphrelay/config.yaml yet.
-# It always ships the complete, current deploy/ files from the repo, so a unit file patched by
-# hand on the host can't be silently reverted by an older staged copy. install.sh keeps the
-# host's existing config.yaml and /etc/graphrelay.env.
+# For development: build Graph Relay from this checkout and install it on a host, from a
+# workstation with Go (Git Bash, Linux or macOS). Normal installs use a published release.
+#
+#   deploy/push.sh root@relay.example.com
+#
+# It builds the same directory layout as a release archive and runs that layout's own update.sh
+# on the host (or setup.sh, if the host has no installation yet), so a development build goes
+# through exactly the steps a release does: backup, migrations, install, health check, rollback.
 set -euo pipefail
-HOST=${1:?usage: CONFIG=path/to/config.yaml deploy/push.sh user@host}
-CONFIG=${CONFIG:-config.yaml}
-[ -f "$CONFIG" ] || { echo "config file $CONFIG not found (set CONFIG=...)" >&2; exit 1; }
+HOST=${1:?usage: deploy/push.sh user@host}
 cd "$(dirname "$0")/.."
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-VERSION=$(git describe --always --dirty)
+VERSION=$(git describe --always --dirty --tags)
+NAME=graphrelay_${VERSION}_linux_amd64
+OUT=$TMP/$NAME
+mkdir -p "$OUT/migrations" "$OUT/docker" "$OUT/docs"
+
 echo "== build $VERSION"
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-s -w -X main.version=$VERSION" -o "$TMP/graphrelay" ./cmd/graphrelay
-cp deploy/install.sh deploy/graphrelay.service deploy/graphrelay.env.example \
-   deploy/graphrelay-fw-sync deploy/graphrelay-fw.service deploy/graphrelay-fw.path    deploy/graphrelay-fw-report deploy/graphrelay-fw-report.service deploy/graphrelay-fw-report.timer "$TMP/"
-cp "$CONFIG" "$TMP/config.yaml"
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$OUT/graphrelay" ./cmd/graphrelay
+for f in deploy/setup.sh deploy/update.sh deploy/install.sh deploy/release-lib.sh deploy/harden-host.sh \
+         deploy/graphrelay.service deploy/graphrelay.env.example \
+         deploy/graphrelay-fw-sync deploy/graphrelay-fw.service deploy/graphrelay-fw.path \
+         deploy/graphrelay-fw-report deploy/graphrelay-fw-report.service deploy/graphrelay-fw-report.timer \
+         config.example.yaml README.md; do
+  cp "$f" "$OUT/"
+done
+cp deploy/migrations/[0-9]*.sh deploy/migrations/README.md "$OUT/migrations/"
+cp deploy/docker/Dockerfile deploy/docker/compose.yaml deploy/docker/setup.sh deploy/docker/update.sh "$OUT/docker/"
+cp docs/*.md "$OUT/docs/"
+printf 'VERSION=%s\nREPO=\n' "$VERSION" > "$OUT/RELEASE"
+tar -C "$TMP" -czf "$TMP/$NAME.tar.gz" "$NAME"
 
 echo "== upload to $HOST"
-ssh "$HOST" 'rm -rf /root/graphrelay-deploy && mkdir -m 700 /root/graphrelay-deploy'
-scp -q "$TMP"/* "$HOST":/root/graphrelay-deploy/
+scp -q "$TMP/$NAME.tar.gz" "$HOST:/root/$NAME.tar.gz"
 
 echo "== install"
-ssh "$HOST" 'bash /root/graphrelay-deploy/install.sh \
-  && echo "version: $(/opt/graphrelay/graphrelay -version)" \
-  && systemctl is-active graphrelay graphrelay-fw.path \
-  && nft list set inet filter smtp4 | grep -E "elements" || echo "smtp4: (no entries)"'
+# shellcheck disable=SC2029
+ssh "$HOST" "set -e; cd /root; rm -rf '$NAME'; tar -xzf '$NAME.tar.gz'; cd '$NAME'; chmod 0755 graphrelay *.sh graphrelay-fw-sync graphrelay-fw-report migrations/*.sh docker/*.sh
+  if [ -x /opt/graphrelay/graphrelay ]; then bash update.sh --force; else bash setup.sh; fi
+  cd /root; rm -rf '$NAME' '$NAME.tar.gz'"

@@ -51,10 +51,20 @@ admin password. Sending fails at the Graph step with a clear error, which is exp
 ## Install
 
 Download the archive for your server from the repository's **Releases** page, check it against
-`SHA256SUMS`, extract it, copy `config.example.yaml` to `config.yaml` and edit it, then run `bash install.sh`
-as root. The archive contains the binary, the installer, the systemd units and the documentation; the server
-needs neither Go nor this repository. [docs/setup.md](docs/setup.md) has every step, including the
-Microsoft 365 side.
+`SHA256SUMS` and extract it. The server needs neither Go nor this repository. Then, as root:
+
+| | Direct install (systemd) | Docker |
+|---|---|---|
+| Install | `bash setup.sh` | `bash docker/setup.sh` |
+| Configure | `/opt/graphrelay/config.yaml`, `/etc/graphrelay.env` | `config.yaml`, `graphrelay.env` in `/opt/graphrelay-docker` |
+| Start | `systemctl start graphrelay` | `docker compose up -d` |
+| Check for updates | `graphrelay-update --check` | `graphrelay-docker-update --check` |
+| Update | `graphrelay-update` | `graphrelay-docker-update` |
+
+An update downloads the newest release, verifies its checksum and runs the new release's own update steps:
+validate the configuration, back up files and database, apply migrations, install, start, health check. A
+failed update is rolled back to the previous version. [docs/setup.md](docs/setup.md) has every step,
+including the Microsoft 365 side.
 
 ## Build and test
 
@@ -65,5 +75,6 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-s -w" -o graphrelay ./
 ```
 
 Releases are built by `.github/workflows/build.yml`: pushing a version tag (`v1.2.3`) tests and builds
-inside a throwaway container with the newest stable Go and publishes the archives. A `Dockerfile` is
-included as well.
+inside a throwaway container with the newest stable Go and publishes the archives. The top-level
+`Dockerfile` builds an image from source; `deploy/docker/` holds the files for the Docker install from a
+release.

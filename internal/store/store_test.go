@@ -88,6 +88,9 @@ func TestAllowedSendersSeededOnUpgrade(t *testing.T) {
 	if _, err := db.Exec(`DELETE FROM settings WHERE key = ?`, keyAllowedSenders); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.Exec(`PRAGMA user_version = 0`); err != nil { // such databases predate schema versions
+		t.Fatal(err)
+	}
 	db.Close()
 
 	s, err = Open(path)

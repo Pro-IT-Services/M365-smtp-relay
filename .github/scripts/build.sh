@@ -59,6 +59,11 @@ if [ -n "$unformatted" ]; then
 fi
 go vet ./...
 go test ./... -count=1
+# Changes that installed servers don't pick up by themselves need a decision about a migration.
+bash deploy/migrations/guard.sh
+for f in deploy/*.sh deploy/migrations/*.sh deploy/docker/*.sh deploy/graphrelay-fw-sync deploy/graphrelay-fw-report; do
+  bash -n "$f"
+done
 echo "::endgroup::"
 
 echo "::group::Build and package $VERSION"
@@ -66,19 +71,27 @@ find "$DIST" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
 for arch in amd64 arm64; do
   name="graphrelay_${VERSION}_linux_${arch}"
   out="$DIST/$name"
-  mkdir -p "$out/docs"
+  mkdir -p "$out/docs" "$out/migrations" "$out/docker"
   GOOS=linux GOARCH=$arch go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$out/graphrelay" ./cmd/graphrelay
-  # Everything install.sh needs, so the archive installs on a server without the repository.
-  for f in deploy/install.sh deploy/harden-host.sh deploy/graphrelay.service deploy/graphrelay.env.example \
+  # Everything setup.sh and update.sh need, so the archive installs and updates a server that has
+  # neither Go nor the repository.
+  for f in deploy/setup.sh deploy/update.sh deploy/install.sh deploy/release-lib.sh deploy/harden-host.sh \
+           deploy/graphrelay.service deploy/graphrelay.env.example \
            deploy/graphrelay-fw-sync deploy/graphrelay-fw.service deploy/graphrelay-fw.path \
            deploy/graphrelay-fw-report deploy/graphrelay-fw-report.service deploy/graphrelay-fw-report.timer \
            config.example.yaml README.md; do
     cp "$f" "$out/"
   done
+  cp deploy/migrations/[0-9]*.sh deploy/migrations/README.md "$out/migrations/"
+  cp deploy/docker/Dockerfile deploy/docker/compose.yaml deploy/docker/setup.sh deploy/docker/update.sh "$out/docker/"
   cp docs/*.md "$out/docs/"
-  for f in graphrelay install.sh harden-host.sh graphrelay-fw-sync graphrelay-fw-report; do
+  # Which release this is and where it came from; setup.sh uses REPO as the update source.
+  printf 'VERSION=%s\nREPO=%s\n' "$VERSION" "${GITHUB_REPOSITORY:-}" > "$out/RELEASE"
+  for f in graphrelay setup.sh update.sh install.sh harden-host.sh graphrelay-fw-sync graphrelay-fw-report \
+           docker/setup.sh docker/update.sh; do
     chmod 0755 "$out/$f"
   done
+  chmod 0755 "$out"/migrations/*.sh
   tar -C "$DIST" --owner=0 --group=0 --numeric-owner -czf "$DIST/$name.tar.gz" "$name"
   rm -rf "$out"
 done

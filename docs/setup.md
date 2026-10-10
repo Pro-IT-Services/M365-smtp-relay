@@ -224,7 +224,7 @@ tls:
   doesn't, or if the certificate is expired or about to expire. A key that doesn't match stops it.
 - The files must be readable by the `graphrelay` user and nobody else who shouldn't have the key:
   `install -d -o root -g graphrelay -m 0750 /etc/graphrelay/tls`, files `root:graphrelay`, mode `0640`.
-  That user is created by the installer, so put the files in place after step 6c and before starting the
+  That user is created by the installer, so put the files in place after step 6b and before starting the
   relay (6e).
 - To renew, replace the files (write the new ones next to them and `mv` them into place). The relay picks
   them up within about a minute, without a restart, and logs "TLS certificate reloaded".
@@ -233,17 +233,24 @@ tls:
 
 ## 6. Install, configure, start
 
+The relay is installed from a **release archive**. The server needs neither Go nor this repository. Two
+kinds of installation are supported; pick one:
+
+- **Direct install** (6a–6e): a systemd service on a Debian-style host. Supports the nftables firewall
+  integration. This is the recommended form.
+- **Docker** (6f): a container managed with Docker Compose.
+
 ### 6a. Download the release
 
 Releases are built by the repository's GitHub Actions workflow and published on the repository's
 **Releases** page. Each release has one archive per CPU architecture and a `SHA256SUMS` file. An archive
-contains the `graphrelay` binary, the installer, the systemd units, the firewall helpers, the hardening
-script, `config.example.yaml` and this documentation, so the server needs neither Go nor the repository.
+contains the `graphrelay` binary, the setup and update scripts, the systemd units, the firewall helpers, the
+hardening script, the host migrations, the Docker files, `config.example.yaml` and this documentation.
 
 On the server, as root (replace `OWNER/REPO` and the version; use `arm64` instead of `amd64` on ARM):
 
 ```bash
-VERSION=v1.0.0
+VERSION=v1.1.0
 BASE=https://github.com/OWNER/REPO/releases/download/$VERSION
 cd /root
 curl -fLO "$BASE/graphrelay_${VERSION}_linux_amd64.tar.gz"
@@ -254,16 +261,33 @@ cd "graphrelay_${VERSION}_linux_amd64"
 ```
 
 If the repository is private, those URLs need a login: download the archive and `SHA256SUMS` from the
-Releases page in your browser (or with `gh release download $VERSION -R OWNER/REPO`), copy them to the server
-with `scp`, then continue from the `sha256sum` line.
+Releases page in your browser, copy them to the server with `scp`, then continue from the `sha256sum` line.
 
-### 6b. Configuration file
+### 6b. Install
 
 In the extracted directory:
 
 ```bash
-cp config.example.yaml config.yaml
-nano config.yaml
+bash setup.sh
+```
+
+`setup.sh` is for the first installation only (it refuses to run over an existing one). It
+
+- creates the `graphrelay` user and `/opt/graphrelay`, and installs the binary, the systemd units and the
+  firewall helpers,
+- creates `/opt/graphrelay/config.yaml` from the example and an empty `/etc/graphrelay.env` (mode 0600),
+- installs the update tooling: `graphrelay-update`, plus `harden-host.sh` in `/opt/graphrelay/bin`,
+- writes `/etc/graphrelay/update.conf` with the repository the archive was built from, so later updates know
+  where to look. For a private repository add `--token-file /etc/graphrelay/update.token` (a root-only file
+  holding a GitHub token that can read the repository),
+- does **not** start the relay.
+
+With `tls.mode: files`, put your certificate and key in place now (step 5b).
+
+### 6c. Configuration file
+
+```bash
+nano /opt/graphrelay/config.yaml
 ```
 
 Set at least:
@@ -271,7 +295,7 @@ Set at least:
 | Setting | Value |
 |---|---|
 | `hostname` | `relay.example.com` |
-| `data_dir` | `/opt/graphrelay/data` |
+| `data_dir` | `/opt/graphrelay/data` (already set by `setup.sh`) |
 | `tls.mode` | `acme` (automatic, needs Cloudflare) or `files` (your own certificate), see section 5 |
 | `tls.acme_email` | `acme` mode: an address for Let's Encrypt expiry notices |
 | `tls.skip_dns_propagation_check` | `acme` mode: `true` only if your network redirects all outbound DNS to an internal resolver (see section 11) |
@@ -285,19 +309,6 @@ Set at least:
 
 Keep secrets out of the file: `graph.*` and `tls.cloudflare_api_token` already reference `${...}` variables
 that are read from `/etc/graphrelay.env` (step 6d).
-
-### 6c. Install
-
-Still in the extracted directory:
-
-```bash
-bash install.sh
-```
-
-The installer creates the `graphrelay` user and `/opt/graphrelay`, installs the binary, your `config.yaml`,
-the systemd units and the firewall helpers, and creates an empty `/etc/graphrelay.env`. It never overwrites
-an existing `config.yaml` or env file, and it starts the relay only once the env file is filled in. With
-`tls.mode: files`, put your certificate and key in place now (step 5b).
 
 ### 6d. Secrets
 
@@ -314,9 +325,11 @@ GRAPH_CLIENT_SECRET=...
 
 No spaces around `=`, no quotes.
 
-### 6e. Start
+### 6e. Check and start
 
 ```bash
+set -a; . /etc/graphrelay.env; set +a
+/opt/graphrelay/graphrelay -check-config -config /opt/graphrelay/config.yaml   # must say: is valid
 systemctl start graphrelay
 journalctl -u graphrelay -f
 ```
@@ -328,6 +341,41 @@ journalctl -u graphrelay -f
 | `SMTP listening` ×3, `management portal listening` | Relay is up |
 | `Microsoft Graph authentication OK` | Tenant ID, client ID and secret are correct |
 | `firewall allowlist updated ... entries=0` | No host rules yet, so the SMTP ports are still closed |
+
+Optionally harden the host (OS updates, key-only SSH, default-drop firewall that opens the SMTP ports only
+for the portal's host rules). Read the script first; it changes SSH and firewall settings:
+
+```bash
+bash /opt/graphrelay/bin/harden-host.sh
+```
+
+### 6f. Alternative: Docker
+
+Needs Docker with the compose plugin. Download and extract the release as in 6a, then:
+
+```bash
+bash docker/setup.sh                      # --dir DIR to install somewhere other than /opt/graphrelay-docker
+cd /opt/graphrelay-docker
+nano config.yaml                          # as in 6c, but keep data_dir and the 2525/4465/5587 ports
+nano graphrelay.env                       # as in 6d
+docker compose run --rm graphrelay -check-config -config /etc/graphrelay/config.yaml
+docker compose up -d && docker compose logs -f
+```
+
+`docker/setup.sh` builds the image `graphrelay:<version>` locally from the binary in the archive (nothing
+is pulled from a registry except the small base image) and creates the directory with `compose.yaml`,
+`config.yaml`, `graphrelay.env`, `data/` and the update tool `graphrelay-docker-update`. The container runs
+as an unprivileged user with a read-only root filesystem and no capabilities; `compose.yaml` maps the host
+ports 25, 465, 587 and 8443 to it.
+
+Differences from a direct install:
+
+- Leave `firewall.allowlist_file` and `firewall.blocked_dir` empty. The nftables integration is for direct
+  installs; restrict the published ports with your host or network firewall.
+- With `tls.mode: files`, mount the certificate directory into the container (add a read-only volume in
+  `compose.yaml`) and make the files readable by uid 10001.
+- Where this guide says `systemctl restart graphrelay`, use `docker compose restart`; logs are
+  `docker compose logs`; the env file is `/opt/graphrelay-docker/graphrelay.env`.
 
 ## 7. First sign-in, mailboxes, host rules, test
 
@@ -404,9 +452,66 @@ systemctl restart graphrelay
 | Own certificate (`files` mode) | Before it expires | Replace the certificate and key files (step 5b); no restart needed |
 | TLS certificate (`acme` mode) | Automatic | Renewed about 30 days before expiry |
 | OS updates | Automatic | `unattended-upgrades` (set up by `harden-host.sh`) |
-| Relay upgrade | When a new release is published | Download and extract the new release (step 6a) and run `bash install.sh` in it. Config, env file, database and certificates are kept; the relay restarts |
-| Backup | Regularly | `/opt/graphrelay/data/` (database, certificates) and `/etc/graphrelay.env` restore everything |
+| Relay update | When a new release is published | `graphrelay-update` (Docker: `graphrelay-docker-update`), see below |
+| Backup | Regularly | `/opt/graphrelay/data/` (database, certificates), `/opt/graphrelay/config.yaml` and `/etc/graphrelay.env` restore everything |
 | Message log | Automatic | Rows older than `log_retention_days` (default 30) are deleted |
+
+### Updating
+
+```bash
+graphrelay-update --check     # shows the installed and the newest version; exit code 10 = update available
+graphrelay-update             # update to the newest release
+```
+
+| Command | What it does |
+|---|---|
+| `graphrelay-update --version v1.2.3` | Install exactly that release |
+| `graphrelay-update --archive FILE` | Install from an archive you copied to the server (no network needed; `SHA256SUMS` next to it is checked) |
+| `bash update.sh` in an extracted archive | Install that release |
+| `--force` | Reinstall the same version, or go back to an older one |
+| `--keep N` | Number of backups to keep (default 5) |
+
+The Docker tool `graphrelay-docker-update` takes the same options, plus `--dir`.
+
+The tool reads the repository from `/etc/graphrelay/update.conf`, asks GitHub for the newest release,
+downloads the archive for the server's architecture and verifies it against `SHA256SUMS`. It then hands
+over to the `update.sh` **inside the new release**, so an update always runs the steps the new version
+needs, even ones the installed tool didn't know about. Every update runs all of them, in this order:
+
+1. **Preflight:** checks that it can run and that the release is complete.
+2. **Validate the configuration with the new binary** (`-check-config`). Nothing has been touched yet; an
+   update that would not start with your config stops here.
+3. **Back up the installed files** into `/opt/graphrelay/backups/`.
+4. **Stop the relay.** Clients get a connection error for the next seconds and retry.
+5. **Back up the database.**
+6. **Host migrations:** every script in `migrations/` that this server has not run yet (see below).
+7. **Install the new files:** binary, systemd units, firewall helpers, update tooling. Your `config.yaml`
+   and env file are never overwritten.
+8. **Start the relay.** It migrates its database to the new schema while starting.
+9. **Health check:** the service is active and listening, the running version is the new one, and the log
+   shows no fatal error.
+10. **Clean up:** backups beyond `--keep` are removed.
+
+If anything from step 4 on fails, the tool restores the previous files, database and firewall ruleset,
+starts the old version again and exits with an error. Sending devices only see a short outage. (The Docker
+tool runs the same sequence with "build the new image" in place of host migrations.)
+
+To be told about updates without installing them, run the check from cron or a monitoring system and alert
+on exit code 10. Automatic installs are possible the same way (`graphrelay-update` without options), but
+for a mail relay it is better to choose the time yourself.
+
+### How updates stay correct (migrations)
+
+Three kinds of things change between releases, and each has its own mechanism so that no step can be
+forgotten:
+
+| What changes | How it is applied | What makes sure it isn't forgotten |
+|---|---|---|
+| Binary, systemd units, helper scripts | Replaced on every update (step 7) | Nothing to forget: always complete |
+| Database schema | The relay applies the missing entries of an ordered migration list on start and records the schema version in the database (`PRAGMA user_version`). A database newer than the binary is refused, so a downgrade can't corrupt it | Tests compare the schema with a recorded copy and upgrade a fixture of **every released schema version**: changing the schema without adding a migration fails the build |
+| Things on the server an update doesn't overwrite: the firewall ruleset, keys in your `config.yaml` | Numbered host migration scripts in `migrations/`, each run once per server (step 6); applied ones are listed in `/opt/graphrelay/host-migrations.applied` | The build fails when one of the guarded files (`harden-host.sh`, `config.example.yaml`, the database schema) changes, until the developer records a decision: add a migration, or confirm none is needed |
+
+Releases can be skipped: updating from any older release runs all the migrations in between, in order.
 
 ### Building it yourself
 
@@ -415,21 +520,25 @@ You only need this to change the code. With Go installed:
 ```bash
 go test ./...
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-s -w" -o graphrelay ./cmd/graphrelay
-CONFIG=config.yaml deploy/push.sh root@relay.example.com   # build, copy and install in one step
+deploy/push.sh root@relay.example.com   # development: build, upload and run the same update steps
 ```
+
+When a build fails because guarded files changed, read `deploy/migrations/README.md`: decide whether
+existing servers need a host migration for your change, then run `bash deploy/migrations/guard.sh --update`.
 
 To publish a release, push a version tag; the workflow in `.github/workflows/build.yml` tests, builds and
 publishes it:
 
 ```bash
-git tag v1.0.0
-git push origin v1.0.0
+git tag v1.1.0
+git push origin v1.1.0
 ```
 
 The workflow runs on a self-hosted runner that has Docker, and uses no external actions. It starts
 throwaway Debian containers that fetch the source, install the newest stable Go, verify the dependencies, run
-the format check, `go vet` and all tests, and build the `amd64` and `arm64` archives. Afterwards it removes
-the containers, the image it pulled and its workspace.
+the format check, `go vet`, all tests and the migration guard, and build the `amd64` and `arm64` archives.
+It also builds the Docker image once and checks that it starts. Afterwards it removes the containers, the
+images and its workspace.
 
 ## 11. Troubleshooting
 

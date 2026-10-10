@@ -70,7 +70,10 @@ func Open(path string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-func (s *Store) migrate() error {
+// migrateBaseline is schema version 1: everything up to and including the first release with a
+// schema version. It is idempotent, because databases from before versioning (user_version 0)
+// already contain some or all of it.
+func (s *Store) migrateBaseline() error {
 	_, err := s.db.Exec(`
 CREATE TABLE IF NOT EXISTS settings (
 	key   TEXT PRIMARY KEY,

@@ -35,10 +35,20 @@ func main() {
 	configPath := flag.String("config", "config.yaml", "path to the configuration file")
 	resetPW := flag.Bool("reset-admin-password", false, "set a new random portal admin password, print it and exit")
 	showVersion := flag.Bool("version", false, "print version and exit")
+	checkConfig := flag.Bool("check-config", false, "load and validate the configuration file, then exit")
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Println(version)
+		return
+	}
+	if *checkConfig {
+		// Used by the update script: does this release accept the installed configuration?
+		if _, err := config.Load(*configPath); err != nil {
+			fmt.Fprintln(os.Stderr, "configuration", *configPath, "is not valid for", version+":", err)
+			os.Exit(1)
+		}
+		fmt.Println("configuration", *configPath, "is valid for", version, "(schema version", fmt.Sprint(store.SchemaVersion())+")")
 		return
 	}
 	level := slog.LevelInfo

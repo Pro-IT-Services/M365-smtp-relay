@@ -92,8 +92,46 @@ jobs:
           # No token, source read-only, archives written to a separate directory.
           docker run --rm --name "$CONTAINER-build" \
             -v "$GITHUB_WORKSPACE:/src:ro" -v "$WORK/dist:/out" -w /src \
-            -e VERSION -e DIST=/out -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+            -e VERSION -e DIST=/out -e GITHUB_REPOSITORY -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
             "$IMAGE" bash .github/scripts/build.sh
+
+      - name: Smoke-test the Docker image
+        env:
+          VERSION: ${{ steps.prep.outputs.version }}
+        run: |
+          # Build the image the Docker install uses and run it once.
+          # The archive was written by the build container and is not trusted on the runner:
+          # nothing in it is used as a path here. Only the binary is taken from it, streamed into
+          # a file we create; the Dockerfile, the config and compose.yaml come from the source.
+          arch=amd64
+          case "$(uname -m)" in aarch64 | arm64) arch=arm64 ;; esac
+          name="graphrelay_${VERSION}_linux_${arch}"
+          archive="$WORK/dist/$name.tar.gz"
+          [ -f "$archive" ] && [ ! -L "$archive" ]
+          # An archive holds plain files and directories only; anything else (a symlink, a device)
+          # means something tampered with the build output.
+          if tar -tvzf "$archive" | cut -c1 | grep -qv '^[-d]$'; then
+            echo "the archive contains entries that are not plain files or directories" >&2
+            exit 1
+          fi
+          t="$WORK/image"
+          mkdir -p "$t/ctx" "$t/compose"
+          tar -xzOf "$archive" "$name/graphrelay" > "$t/ctx/graphrelay"
+          chmod 0755 "$t/ctx/graphrelay"
+          docker build --pull -q -t "$CONTAINER-image" -f "$GITHUB_WORKSPACE/deploy/docker/Dockerfile" "$t/ctx"
+          got=$(docker run --rm --name "$CONTAINER-image" "$CONTAINER-image" -version)
+          echo "image reports version $got"
+          [ "$got" = "$VERSION" ]
+          # The example config with dummy credentials must be accepted by the binary in the image.
+          docker run --rm -v "$GITHUB_WORKSPACE/config.example.yaml:/etc/graphrelay/config.yaml:ro" \
+            -e CLOUDFLARE_API_TOKEN=x -e GRAPH_TENANT_ID=00000000-0000-0000-0000-000000000001 \
+            -e GRAPH_CLIENT_ID=c -e GRAPH_CLIENT_SECRET=s \
+            "$CONTAINER-image" -check-config -config /etc/graphrelay/config.yaml
+          if docker compose version >/dev/null 2>&1; then
+            cp "$GITHUB_WORKSPACE/deploy/docker/compose.yaml" "$t/compose/compose.yaml"
+            : > "$t/compose/graphrelay.env"
+            (cd "$t/compose" && GRAPHRELAY_VERSION="$VERSION" docker compose -f compose.yaml config -q) && echo "compose.yaml is valid"
+          fi
 
       - name: Publish the release (in a container)
         if: github.ref_type == 'tag'
@@ -113,9 +151,10 @@ jobs:
       - name: Clean up
         if: always()
         run: |
-          for c in fetch build release; do
+          for c in fetch build release image; do
             docker rm -f "$CONTAINER-$c" >/dev/null 2>&1 || true
           done
+          docker image rm "$CONTAINER-image" >/dev/null 2>&1 || true
           # Remove the image only if this job brought it onto the runner.
           if [ "${{ steps.prep.outputs.image_present }}" = false ]; then
             docker image rm "$IMAGE" >/dev/null 2>&1 || true

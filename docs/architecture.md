@@ -264,9 +264,18 @@ SQLite through `modernc.org/sqlite` (pure Go, no CGO), WAL mode, one connection,
 
 - **Message content is never stored.** Bodies and attachments exist only in memory while being delivered.
   Graph keeps a copy in the sending mailbox's Sent Items.
-- **Migrations** run on every open: tables are created if missing, columns added later are appended with
-  `ALTER TABLE` (`addColumn`), and on first open after an upgrade the allowed sender list is seeded from the
-  existing rules' mailboxes so working mail isn't blocked.
+- **Migrations** (`migrations.go`) run on every open. The schema version is the number of entries in the
+  ordered `migrations` list and is stored in the database as `PRAGMA user_version`. Opening applies the
+  entries the database doesn't have yet, in order, and then records the new version. A database with a
+  higher version than the binary knows is refused, so an older binary never writes to a newer schema.
+  Entry 1 is the baseline: it creates missing tables, appends columns that older databases lack
+  (`addColumn`) and seeds the allowed sender list from the existing rules' mailboxes, so it also upgrades
+  databases from before versioning (version 0).
+- **Schema tests** (`schema_test.go`) keep the list honest. `testdata/schema.golden` is the schema of a new
+  database together with its version: a schema change without a new migration entry fails the test, and
+  the golden file can only be regenerated (`UPDATE_GOLDEN=1`) once the version went up.
+  `testdata/history/schema-vN.sql` holds the schema of every released version; each one is opened, must
+  migrate to the current schema and keep its data.
 - Secrets (Graph client secret, Cloudflare token) are never stored in the database; they come from the
   configuration or environment.
 
@@ -301,11 +310,43 @@ The relay itself runs as an unprivileged user with only `CAP_NET_BIND_SERVICE`.
 |---|---|
 | `graphrelay.service` | systemd unit: user `graphrelay`, `CAP_NET_BIND_SERVICE` only, `ProtectSystem=strict`, writes only to `/opt/graphrelay`, secrets from `/etc/graphrelay.env`, restart after 30 s |
 | `graphrelay.env.example` | Template for `/etc/graphrelay.env` (mode 0600) |
-| `install.sh` | Creates the user and directories, installs binary and units; never overwrites an existing config or env file; starts the service only when the env file is filled |
-| `push.sh` | For development, from a workstation: builds the Linux binary and ships it together with all current deploy files, then runs `install.sh`. Normal installs use the release archive |
+| `setup.sh` | First installation from a release archive: runs `install.sh --no-start`, writes `/etc/graphrelay/update.conf` (the repository to update from), marks all host migrations as applied. Refuses to run over an existing installation |
+| `update.sh` | Installed as `graphrelay-update`. Finds, downloads and verifies a release, then hands over to the `update.sh` of that release, which runs the ten update steps with rollback (below) |
+| `install.sh` | The idempotent file installer both of them use: user and directories, binary, units, helpers, update tooling in `/opt/graphrelay/bin`; never overwrites an existing config or env file |
+| `release-lib.sh` | Shared shell functions: read `update.conf`, query the GitHub releases API, compare versions, download an archive and verify its checksum. A token, if configured, is passed to curl through a private file |
+| `migrations/` | Host migrations: numbered scripts for changes an update doesn't overwrite by itself, plus `guard.sh` and `GUARD` (below) |
+| `docker/` | Docker install: `Dockerfile` (binary on a minimal base image, unprivileged user), `compose.yaml`, `setup.sh`, `update.sh` (installed as `graphrelay-docker-update`) |
+| `push.sh` | For development, from a workstation: builds the Linux binary, packs it with the current deploy files in the release layout, uploads it and runs `update.sh` (or `setup.sh` on a new host). Normal installs use the release archive |
 | `harden-host.sh` | Debian host hardening: updates, unattended-upgrades, key-only SSH, nftables default-drop with a 120 s automatic rollback |
 | `graphrelay-fw-sync`, `graphrelay-fw.path`, `graphrelay-fw.service` | Firewall allowlist sync (see above) |
 | `graphrelay-fw-report`, `graphrelay-fw-report.service`, `graphrelay-fw-report.timer` | Publish the sources the firewall dropped, for the Activity page |
+
+### Updates and migrations
+
+`update.sh` has two parts. The first, run from the installed copy, decides what to install (newest
+release, `--version`, or `--archive`), downloads and verifies it, and then executes the `update.sh` found
+**in that release**. The second part therefore always comes from the version being installed, so a release
+can add a step without depending on the tool already on the server. It runs, under a lock:
+
+1. preflight, 2. `-check-config` with the new binary against the live configuration, 3. backup of the
+installed files, 4. stop, 5. database backup, 6. host migrations, 7. `install.sh`, 8. start (the relay
+migrates its database), 9. health check (service active, listening, reports the new version, no fatal log
+line), 10. cleanup of old backups.
+
+Steps 1 to 3 change nothing. From step 4 on an `ERR` trap restores the files, the database and
+`/etc/nftables.conf` from the backup and starts the previous version.
+
+Three mechanisms make sure an update is complete:
+
+- Files the release owns are replaced on every update; there is nothing to track.
+- The database schema is versioned and tested as described under Storage.
+- **Host migrations** cover what lives on the server and is written only once: the nftables ruleset from
+  `harden-host.sh`, keys in the user's `config.yaml`. Each `migrations/NNNN-name.sh` is idempotent and runs
+  once per server; applied names are recorded in `/opt/graphrelay/host-migrations.applied`. So that such a
+  change can't ship without one, `migrations/GUARD` holds checksums of the files whose changes servers do
+  not pick up automatically (`harden-host.sh`, `config.example.yaml`, the golden schema). The build runs
+  `guard.sh` and fails on a mismatch until `guard.sh --update` records that the developer either added a
+  migration or decided none is needed. See `deploy/migrations/README.md`.
 
 ## Release build (`.github/`)
 
@@ -320,12 +361,17 @@ policy only allows actions from the repository itself. One job does everything, 
 1. **Fetch:** installs git and fetches exactly the pushed commit, using the job's token. The release
    script is then copied to a private directory outside the workspace.
 2. **Test and build:** runs `.github/scripts/build.sh`. It installs the newest stable Go from go.dev (checked
-   against the published SHA-256), runs `go mod verify`, the gofmt check, `go vet` and `go test`, then builds
-   static `linux/amd64` and `linux/arm64` binaries and packs each with the installer, units, helpers,
-   `config.example.yaml` and the docs into `graphrelay_<version>_linux_<arch>.tar.gz`, plus `SHA256SUMS`.
+   against the published SHA-256), runs `go mod verify`, the gofmt check, `go vet`, `go test`, the
+   migration guard and a syntax check of the shell scripts, then builds static `linux/amd64` and
+   `linux/arm64` binaries and packs each with the setup and update scripts, units, helpers, host
+   migrations, Docker files, `config.example.yaml`, the docs and a `RELEASE` file (version and repository)
+   into `graphrelay_<version>_linux_<arch>.tar.gz`, plus `SHA256SUMS`.
    This container runs the tests and the dependencies' code, so it gets no token, sees the source
    read-only and can only write to the separate output directory.
-3. **Publish** (tags only): runs the copy of `release.sh` set aside in step 1, with only that script and
+3. **Image smoke test** (on the runner, no token): builds the Docker image from the built binary and
+   `deploy/docker/Dockerfile`, checks the version it reports and that it accepts `config.example.yaml`.
+   The archive is treated as untrusted: only the binary is streamed out of it.
+4. **Publish** (tags only): runs the copy of `release.sh` set aside in step 1, with only that script and
    the archives mounted, both read-only. Nothing the build could have changed is executed while the write
    token is present, and the output directory is not trusted beyond the bytes of the expected files: the
    workflow first deletes anything in it that is not a plain file, and the script uploads only the three

@@ -1,0 +1,32 @@
+# Graph Relay in Docker. Managed by docker/setup.sh and docker/update.sh, which build the image
+# from the release binary and write GRAPHRELAY_VERSION into the .env file next to this one.
+#
+#   docker compose up -d        start        docker compose logs -f     follow the log
+#   docker compose down         stop
+services:
+  graphrelay:
+    image: graphrelay:${GRAPHRELAY_VERSION:?set by docker/setup.sh in .env}
+    container_name: graphrelay
+    restart: unless-stopped
+    # Secrets (Graph and Cloudflare credentials); never put them in config.yaml.
+    env_file: ./graphrelay.env
+    ports:
+      # host:container. The relay runs unprivileged and listens on high ports inside.
+      # With these mappings it sees the real client addresses, which the host rules need.
+      - "25:2525"
+      - "465:4465"
+      - "587:5587"
+      - "8443:8443"
+    volumes:
+      - ./config.yaml:/etc/graphrelay/config.yaml:ro
+      # Database, certificates and the ACME account. Back this directory up.
+      - ./data:/var/lib/graphrelay
+      # Only for tls.mode "files": your certificate and key (readable by uid 10001).
+      # - ./tls:/etc/graphrelay/tls:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
