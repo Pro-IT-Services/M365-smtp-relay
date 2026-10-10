@@ -3,9 +3,12 @@ name: Build and release
 # Every push to main is tested and built. Pushing a version tag (v1.2.3) additionally publishes a
 # GitHub release with the archives and their checksums.
 #
-# Everything runs inside a throwaway Debian container on a self-hosted runner. The runner only
-# needs Docker: the container installs the newest stable Go itself, and each job removes its
-# container, the image (if the job pulled it) and its workspace when it ends.
+# Everything runs inside throwaway Debian containers on a self-hosted runner. The runner only needs
+# Docker: the container fetches the source and installs the newest stable Go itself, and the job
+# removes its containers, the image (if the job pulled it) and its workspace when it ends.
+#
+# No external actions are used (not even actions/checkout), so the workflow also runs where the
+# Actions policy only allows actions from the repository itself.
 #
 # Pull requests are deliberately not built: a self-hosted runner must not run code from forks.
 
@@ -16,7 +19,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write # read the source; on tags, create the release
 
 concurrency:
   group: build-${{ github.ref }}
@@ -24,101 +27,70 @@ concurrency:
 
 env:
   IMAGE: debian:stable-slim
+  CONTAINER: graphrelay-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
   build:
-    name: Test and build
+    name: Test, build and release
     runs-on: [self-hosted, linux]
     timeout-minutes: 30
-    outputs:
-      version: ${{ steps.version.outputs.version }}
     steps:
-      - name: Check out
-        uses: actions/checkout@v4
-
-      - name: Version
-        id: version
+      - name: Prepare
+        id: prep
         run: |
+          # Start from an empty workspace, whatever an earlier job left behind.
+          find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
           if [ "$GITHUB_REF_TYPE" = tag ]; then
             echo "version=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
           else
             echo "version=dev-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
           fi
-
-      - name: Note whether the image is already on the runner
-        id: image
-        run: |
+          # Remember whether the image was already on the runner, so cleanup only removes what we brought.
           if docker image inspect "$IMAGE" >/dev/null 2>&1; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "image_present=true" >> "$GITHUB_OUTPUT"
           else
-            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "image_present=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Test and build in a container
+      - name: Fetch the source (in a container)
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          docker run --rm --pull always \
-            --name "graphrelay-build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+          docker run --rm --pull always --name "$CONTAINER-fetch" \
+            -v "$GITHUB_WORKSPACE:/src" -w /src \
+            -e GITHUB_TOKEN -e GITHUB_SERVER_URL -e GITHUB_REPOSITORY -e GITHUB_SHA \
+            -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+            "$IMAGE" bash -euo pipefail -c '
+              trap "chown -R \"$HOST_UID:$HOST_GID\" /src" EXIT
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -q
+              apt-get install -y -q --no-install-recommends ca-certificates git
+              git config --global --add safe.directory /src
+              git init -q .
+              git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+              auth=$(printf "x-access-token:%s" "$GITHUB_TOKEN" | base64 -w0)
+              git -c "http.extraheader=AUTHORIZATION: basic $auth" fetch -q --depth 1 origin "$GITHUB_SHA"
+              git checkout -q FETCH_HEAD
+              git log -1 --format="checked out %h %s"
+            '
+
+      - name: Test and build (in a container)
+        env:
+          VERSION: ${{ steps.prep.outputs.version }}
+        run: |
+          # No token in here: this container runs the tests and the dependencies' code.
+          docker run --rm --name "$CONTAINER-build" \
             -v "$GITHUB_WORKSPACE:/src" -w /src \
             -e VERSION -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
             "$IMAGE" bash .github/scripts/build.sh
 
-      - name: Keep the archives
-        uses: actions/upload-artifact@v4
-        with:
-          name: graphrelay-${{ steps.version.outputs.version }}
-          path: dist/
-          if-no-files-found: error
-          retention-days: 14
-
-      - name: Clean up
-        if: always()
-        run: |
-          docker rm -f "graphrelay-build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >/dev/null 2>&1 || true
-          # Remove the image only if this job brought it onto the runner.
-          if [ "${{ steps.image.outputs.present }}" = false ]; then
-            docker image rm "$IMAGE" >/dev/null 2>&1 || true
-          fi
-          docker image prune -f >/dev/null 2>&1 || true
-          # Empty the workspace, including hidden files.
-          find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
-
-  release:
-    name: Publish release
-    if: github.ref_type == 'tag'
-    needs: build
-    runs-on: [self-hosted, linux]
-    timeout-minutes: 15
-    permissions:
-      contents: write
-    steps:
-      - name: Check out
-        uses: actions/checkout@v4
-
-      - name: Fetch the archives
-        uses: actions/download-artifact@v4
-        with:
-          name: graphrelay-${{ needs.build.outputs.version }}
-          path: dist/
-
-      - name: Note whether the image is already on the runner
-        id: image
-        run: |
-          if docker image inspect "$IMAGE" >/dev/null 2>&1; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Publish
+      - name: Publish the release (in a container)
+        if: github.ref_type == 'tag'
         env:
-          VERSION: ${{ needs.build.outputs.version }}
+          VERSION: ${{ steps.prep.outputs.version }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          (cd dist && sha256sum -c SHA256SUMS)
-          docker run --rm --pull always \
-            --name "graphrelay-release-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+          docker run --rm --name "$CONTAINER-release" \
             -v "$GITHUB_WORKSPACE:/src" -w /src \
             -e VERSION -e GITHUB_REPOSITORY -e GITHUB_TOKEN \
             "$IMAGE" bash .github/scripts/release.sh
@@ -126,9 +98,13 @@ jobs:
       - name: Clean up
         if: always()
         run: |
-          docker rm -f "graphrelay-release-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >/dev/null 2>&1 || true
-          if [ "${{ steps.image.outputs.present }}" = false ]; then
+          for c in fetch build release; do
+            docker rm -f "$CONTAINER-$c" >/dev/null 2>&1 || true
+          done
+          # Remove the image only if this job brought it onto the runner.
+          if [ "${{ steps.prep.outputs.image_present }}" = false ]; then
             docker image rm "$IMAGE" >/dev/null 2>&1 || true
           fi
           docker image prune -f >/dev/null 2>&1 || true
+          # Empty the workspace, including hidden files.
           find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true

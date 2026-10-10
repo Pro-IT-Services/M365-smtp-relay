@@ -426,9 +426,10 @@ git tag v1.0.0
 git push origin v1.0.0
 ```
 
-The workflow runs on a self-hosted runner that has Docker. It starts a throwaway Debian container, installs
-the newest stable Go in it, verifies the dependencies, runs the format check, `go vet` and all tests, builds
-the `amd64` and `arm64` archives, and removes the container, the image it pulled and its workspace when done.
+The workflow runs on a self-hosted runner that has Docker, and uses no external actions. It starts
+throwaway Debian containers that fetch the source, install the newest stable Go, verify the dependencies, run
+the format check, `go vet` and all tests, and build the `amd64` and `arm64` archives. Afterwards it removes
+the containers, the image it pulled and its workspace.
 
 ## 11. Troubleshooting
 
