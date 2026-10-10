@@ -158,6 +158,7 @@ backup_database() {
   for f in "$PREFIX"/data/relay.db "$PREFIX"/data/relay.db-wal "$PREFIX"/data/relay.db-shm "$PREFIX"/data/firewall-allowlist.txt; do
     if [ -e "$f" ]; then cp -a "$f" "$BACKUP/data/"; fi
   done
+  : > "$BACKUP/data/.complete"
 }
 
 rollback() {
@@ -167,20 +168,26 @@ rollback() {
   echo
   echo "!! The update to $NEW failed (exit $rc). Restoring $OLD from $BACKUP"
   systemctl stop graphrelay 2>/dev/null
+  local fw_changed=0
+  if [ -e "$BACKUP/files/etc/nftables.conf" ] && ! cmp -s "$BACKUP/files/etc/nftables.conf" /etc/nftables.conf 2>/dev/null; then
+    fw_changed=1
+  fi
   for f in $FILES; do
     if [ -e "$BACKUP/files$f" ]; then
       cp -a "$BACKUP/files$f" "$f"
     fi
   done
-  if [ -d "$BACKUP/data" ]; then
+  if [ -e "$BACKUP/data/.complete" ]; then # never restore from a half-written backup
     rm -f "$PREFIX"/data/relay.db "$PREFIX"/data/relay.db-wal "$PREFIX"/data/relay.db-shm
-    cp -a "$BACKUP"/data/. "$PREFIX/data/"
+    # File by file: copying the directory itself would give data/ the backup directory's owner
+    # and mode, and the relay could no longer open its database.
+    for f in "$BACKUP"/data/*; do
+      if [ -e "$f" ]; then cp -a "$f" "$PREFIX/data/"; fi
+    done
   fi
   systemctl daemon-reload
-  if [ -e "$BACKUP/files/etc/nftables.conf" ] && ! cmp -s "$BACKUP/files/etc/nftables.conf" /etc/nftables.conf 2>/dev/null; then
-    cp -a "$BACKUP/files/etc/nftables.conf" /etc/nftables.conf
-  fi
-  if systemctl is-active -q nftables 2>/dev/null; then
+  # The loop above put the previous ruleset back; load it only if a migration had changed it.
+  if [ "$fw_changed" = 1 ] && systemctl is-active -q nftables 2>/dev/null; then
     nft -f /etc/nftables.conf 2>/dev/null && /usr/local/sbin/graphrelay-fw-sync 2>/dev/null
   fi
   if [ "$STOPPED" = 1 ]; then

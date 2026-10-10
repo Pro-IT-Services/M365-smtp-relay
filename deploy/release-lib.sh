@@ -3,11 +3,13 @@
 #
 # Settings come from /etc/graphrelay/update.conf (shell syntax):
 #   REPO=owner/name            the GitHub repository that publishes the releases
+# Without a REPO there, the one recorded in /opt/graphrelay/RELEASE is used.
 #   TOKEN_FILE=/path           optional: file holding a token with read access to the repository's
 #                              contents; required when the repository is private
 # GITHUB_TOKEN in the environment overrides TOKEN_FILE.
 
 GR_CONF=${GR_CONF:-/etc/graphrelay/update.conf}
+GR_RELEASE_FILE=${GR_RELEASE_FILE:-/opt/graphrelay/RELEASE}
 
 gr_die() { echo "error: $*" >&2; exit 1; }
 
@@ -18,6 +20,11 @@ gr_load_conf() {
   if [ -r "$GR_CONF" ]; then
     # shellcheck disable=SC1090
     . "$GR_CONF"
+  fi
+  # An installation upgraded from a release without setup.sh has no update.conf yet: fall back to
+  # the repository the installed release was built from.
+  if [ -z "$REPO" ] && [ -r "$GR_RELEASE_FILE" ]; then
+    REPO=$(sed -n 's/^REPO=//p' "$GR_RELEASE_FILE" | head -n 1)
   fi
   [ -n "$REPO" ] || gr_die "no repository configured: set REPO=owner/name in $GR_CONF"
   case "$REPO" in

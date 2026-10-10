@@ -131,9 +131,13 @@ rollback() {
     if [ -e "$BACKUP/files/$f" ]; then cp -a "$BACKUP/files/$f" "$DIR/$f"; fi
   done
   if [ -d "$BACKUP/files/bin" ]; then cp -a "$BACKUP/files/bin/." "$DIR/bin/"; fi
-  if [ -d "$BACKUP/data" ]; then
+  if [ -e "$BACKUP/data/.complete" ]; then # never restore from a half-written backup
     rm -f "$DIR"/data/relay.db "$DIR"/data/relay.db-wal "$DIR"/data/relay.db-shm
-    cp -a "$BACKUP"/data/. "$DIR/data/"
+    # File by file: copying the directory itself would give data/ the backup directory's owner
+    # and mode, and the container could no longer open its database.
+    for f in "$BACKUP"/data/*; do
+      if [ -e "$f" ]; then cp -a "$f" "$DIR/data/"; fi
+    done
   fi
   if [ "$STOPPED" = 1 ]; then
     compose up -d >/dev/null 2>&1
@@ -215,6 +219,7 @@ install -d -m 0700 "$BACKUP/data"
 for f in "$DIR"/data/relay.db "$DIR"/data/relay.db-wal "$DIR"/data/relay.db-shm; do
   if [ -e "$f" ]; then cp -a "$f" "$BACKUP/data/"; fi
 done
+: > "$BACKUP/data/.complete"
 ls "$BACKUP/data" 2>/dev/null | sed 's/^/saved /'
 
 step "Install the new files"
