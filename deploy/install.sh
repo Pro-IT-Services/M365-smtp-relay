@@ -42,9 +42,10 @@ if [ ! -e "$PREFIX/config.yaml" ]; then
 fi
 [ -e /etc/graphrelay.env ] || install -o root -g root -m 0600 graphrelay.env.example /etc/graphrelay.env
 
-install -o root -g root -m 0755 graphrelay-fw-sync graphrelay-fw-report /usr/local/sbin/
+install -o root -g root -m 0755 graphrelay-fw-sync graphrelay-fw-report graphrelay-egress-sync /usr/local/sbin/
 install -o root -g root -m 0644 graphrelay.service graphrelay-fw.service graphrelay-fw.path \
-  graphrelay-fw-report.service graphrelay-fw-report.timer /etc/systemd/system/
+  graphrelay-fw-report.service graphrelay-fw-report.timer \
+  graphrelay-egress.service graphrelay-egress.timer /etc/systemd/system/
 
 # The update tooling stays on the host, so later updates need nothing but this server.
 install -o root -g root -m 0755 update.sh "$PREFIX/bin/graphrelay-update"
@@ -56,11 +57,15 @@ if [ -e RELEASE ]; then
 fi
 
 systemctl daemon-reload
-systemctl enable -q graphrelay-fw.service graphrelay-fw.path graphrelay-fw-report.timer graphrelay.service
+systemctl enable -q graphrelay-fw.service graphrelay-fw.path graphrelay-fw-report.timer graphrelay.service \
+  graphrelay-egress.service graphrelay-egress.timer
 systemctl start graphrelay-fw.path
 systemctl start graphrelay-fw.service
 systemctl start graphrelay-fw-report.timer
 systemctl start graphrelay-fw-report.service
+# Does nothing unless the firewall limits outbound traffic (harden-host.sh --restrict-outbound).
+systemctl start graphrelay-egress.timer
+systemctl start graphrelay-egress.service
 
 [ "$START" = 1 ] || exit 0
 if grep -qE '^[A-Z_]+=\s*$' /etc/graphrelay.env; then

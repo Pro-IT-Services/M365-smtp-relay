@@ -24,6 +24,7 @@ for f in deploy/setup.sh deploy/update.sh deploy/install.sh deploy/release-lib.s
          deploy/graphrelay.service deploy/graphrelay.env.example \
          deploy/graphrelay-fw-sync deploy/graphrelay-fw.service deploy/graphrelay-fw.path \
          deploy/graphrelay-fw-report deploy/graphrelay-fw-report.service deploy/graphrelay-fw-report.timer \
+         deploy/graphrelay-egress-sync deploy/graphrelay-egress.service deploy/graphrelay-egress.timer \
          config.example.yaml README.md; do
   cp "$f" "$OUT/"
 done
@@ -38,6 +39,6 @@ scp -q "$TMP/$NAME.tar.gz" "$HOST:/root/$NAME.tar.gz"
 
 echo "== install"
 # shellcheck disable=SC2029
-ssh "$HOST" "set -e; cd /root; rm -rf '$NAME'; tar -xzf '$NAME.tar.gz'; cd '$NAME'; chmod 0755 graphrelay *.sh graphrelay-fw-sync graphrelay-fw-report migrations/*.sh docker/*.sh
+ssh "$HOST" "set -e; cd /root; rm -rf '$NAME'; tar -xzf '$NAME.tar.gz'; cd '$NAME'; chmod 0755 graphrelay *.sh graphrelay-fw-sync graphrelay-fw-report graphrelay-egress-sync migrations/*.sh docker/*.sh
   if [ -x /opt/graphrelay/graphrelay ]; then bash update.sh --force; else bash setup.sh; fi
   cd /root; rm -rf '$NAME' '$NAME.tar.gz'"

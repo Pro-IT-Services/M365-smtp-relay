@@ -1,0 +1,23 @@
+[Unit]
+Description=Refresh the addresses Graph Relay's host may connect to (outbound firewall)
+After=nftables.service
+# The relay needs these addresses before it can reach Microsoft.
+Before=graphrelay.service
+# Re-run whenever nftables (re)loads its ruleset, which empties the sets.
+PartOf=nftables.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/graphrelay-egress-sync
+StateDirectory=graphrelay-egress
+StateDirectoryMode=0700
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+RestrictAddressFamilies=AF_NETLINK AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target nftables.service

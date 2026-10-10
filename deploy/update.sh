@@ -134,11 +134,14 @@ $ENVFILE
 /etc/nftables.conf
 /usr/local/sbin/graphrelay-fw-sync
 /usr/local/sbin/graphrelay-fw-report
+/usr/local/sbin/graphrelay-egress-sync
 /etc/systemd/system/graphrelay.service
 /etc/systemd/system/graphrelay-fw.service
 /etc/systemd/system/graphrelay-fw.path
 /etc/systemd/system/graphrelay-fw-report.service
 /etc/systemd/system/graphrelay-fw-report.timer
+/etc/systemd/system/graphrelay-egress.service
+/etc/systemd/system/graphrelay-egress.timer
 "
 
 backup_files() {

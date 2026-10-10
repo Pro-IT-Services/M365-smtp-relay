@@ -349,6 +349,37 @@ for the portal's host rules). Read the script first; it changes SSH and firewall
 bash /opt/graphrelay/bin/harden-host.sh
 ```
 
+**Limiting outbound traffic (optional).** With `--restrict-outbound` the firewall also limits what the
+server itself may connect to, so a compromised relay can't reach the rest of your network or the internet
+at large:
+
+```bash
+bash /opt/graphrelay/bin/harden-host.sh --restrict-outbound
+```
+
+| Allowed outbound | Why |
+|---|---|
+| DNS (port 53) to the resolvers in `/etc/resolv.conf` only | Name resolution |
+| Ports 80/443 to Microsoft (`login.microsoftonline.com`, `graph.microsoft.com`, `outlook.office.com`, `outlook.office365.com`) | Sending mail, portal sign-in |
+| Ports 80/443 to Let's Encrypt and `api.cloudflare.com` | Certificate (`acme` mode) |
+| Ports 80/443 to GitHub (`api.github.com`, `github.com`, release downloads) | `graphrelay-update` |
+| Ports 80/443 to the package mirrors in `/etc/apt/sources.list*` | OS updates |
+| NTP, DHCP, ICMP, replies to inbound connections | Basics |
+
+Everything else is refused, including SSH and SMTP from the relay to other machines. Things to know:
+
+- A firewall filters addresses, not names, and these services change their addresses often. The helper
+  `graphrelay-egress-sync` resolves the names every 30 seconds and allows each address for a day after it
+  was last seen. Rarely, a service hands out an address a few seconds before the helper has seen it; that
+  connection is refused, the sending device gets a temporary error (`451`) and retries.
+- Your own destinations (a monitoring or log server, an internal package mirror, a proxy) go into
+  `/etc/graphrelay/egress-hosts.conf`, one host name, address or network per line.
+- If something stops working, `nft list set inet filter egress_blocked4` shows the destinations that were
+  refused, with packet counters.
+- In `acme` mode the certificate check asks the domain's own name servers directly, which the DNS limit
+  refuses. Set `tls.skip_dns_propagation_check: true` when you use this option.
+- `--open-outbound` removes the limit again. Running the script without either option keeps what is set.
+
 ### 6f. Alternative: Docker
 
 Needs Docker with the compose plugin. Download and extract the release as in 6a, then:

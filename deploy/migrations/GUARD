@@ -1,5 +1,5 @@
 # Checksums of files whose changes may need a migration on existing servers.
 # Do not edit by hand. See deploy/migrations/README.md, then run: bash deploy/migrations/guard.sh --update
-0caf195c62bd18206cb93e322151a1b82f734a68af8800be29df498017a65ffd  deploy/harden-host.sh
+305bedd837d63ac599aee22c5056f81c8fea99c16ec0f2b02f4088a8d40b05f0  deploy/harden-host.sh
 f70ee443a1430a8efd9acb0d428e00c813cb2e120bf585af06a4a71e5bbece19  config.example.yaml
 f3ebdc65cd9015b7c66cf5654fc52472e100429889d19aaccd5f3603d9235a1b  internal/store/testdata/schema.golden

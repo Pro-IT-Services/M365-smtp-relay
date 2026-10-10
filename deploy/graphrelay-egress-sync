@@ -1,0 +1,128 @@
+#!/bin/bash
+# Keep the nftables sets that limit OUTBOUND traffic up to date (inet filter dns4/dns6 and
+# egress4/egress6, see deploy/harden-host.sh --restrict-outbound). Runs as root from
+# graphrelay-egress.service, started by a timer and whenever nftables reloads.
+#
+# A firewall filters addresses, not names, and the services the relay needs (Microsoft, Let's
+# Encrypt, Cloudflare, GitHub, the package mirrors) change their addresses all the time. So this
+# script resolves the needed names on every run and remembers each address for a day. The sets
+# are replaced in one nft transaction; if nft rejects anything, the previous contents stay.
+#
+# Does nothing on a host whose firewall has no outbound restriction.
+set -euo pipefail
+
+EXTRA=${EXTRA:-/etc/graphrelay/egress-hosts.conf}
+STATE_DIR=${STATE_DIR:-/var/lib/graphrelay-egress}
+KEEP_SECONDS=86400 # how long an address stays allowed after it was last seen in DNS
+MAX=5000
+
+nft list set inet filter egress4 >/dev/null 2>&1 || exit 0
+
+# What the relay itself needs.
+HOSTS="
+login.microsoftonline.com
+graph.microsoft.com
+outlook.office.com
+outlook.office365.com
+acme-v02.api.letsencrypt.org
+api.cloudflare.com
+api.github.com
+github.com
+objects.githubusercontent.com
+release-assets.githubusercontent.com
+"
+# Let's Encrypt publishes its CA certificates here; the portal's certificate download uses them.
+for ca in x1 x2 e5 e6 e7 e8 e9 r10 r11 r12 r13 r14; do
+  HOSTS="$HOSTS $ca.i.lencr.org"
+done
+# The package mirrors this host is configured to use.
+apt_hosts=$(cat /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null |
+  grep -vE '^[[:space:]]*#' | grep -oE 'https?://[A-Za-z0-9.-]+' | sed -E 's#^https?://##' | sort -u || true)
+HOSTS="$HOSTS $apt_hosts"
+
+is_v4() { [[ $1 =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/([0-9]|[12][0-9]|3[0-2]))?$ ]]; }
+is_v6() { [[ $1 == *:* && $1 =~ ^[0-9a-fA-F:.]+(/([0-9]|[1-9][0-9]|1[01][0-9]|12[0-8]))?$ ]]; }
+is_name() { [[ $1 =~ ^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$ ]]; }
+
+# Site additions: one host name, address or network per line.
+fixed=()
+if [[ -r $EXTRA ]]; then
+  while IFS= read -r line || [[ -n $line ]]; do
+    line=${line%%#*}
+    line=${line//[[:space:]]/}
+    [[ -z $line ]] && continue
+    if is_v4 "$line" || is_v6 "$line"; then
+      fixed+=("$line")
+    elif is_name "$line"; then
+      HOSTS="$HOSTS $line"
+    else
+      echo "graphrelay-egress-sync: ignoring invalid entry in $EXTRA: ${line:0:60}" >&2
+    fi
+  done < <(head -c 65536 "$EXTRA")
+fi
+
+# The resolvers this host uses. They must be reachable before anything can be resolved.
+dns4=() dns6=()
+while read -r ns; do
+  ns=${ns%%[%]*} # drop an interface suffix such as fe80::1%eth0
+  if is_v4 "$ns"; then dns4+=("$ns"); elif is_v6 "$ns"; then dns6+=("$ns"); fi
+done < <(awk '$1 == "nameserver" { print $2 }' /etc/resolv.conf 2>/dev/null)
+
+join() { local IFS=,; echo "$*"; }
+{
+  echo "flush set inet filter dns4"
+  echo "flush set inet filter dns6"
+  (( ${#dns4[@]} )) && echo "add element inet filter dns4 { $(join "${dns4[@]}") }"
+  (( ${#dns6[@]} )) && echo "add element inet filter dns6 { $(join "${dns6[@]}") }"
+  true
+} | nft -f -
+
+# Resolve, and remember when each address was last seen.
+install -d -m 0700 "$STATE_DIR"
+SEEN=$STATE_DIR/seen
+touch "$SEEN"
+now=$(date +%s)
+new=$(mktemp "$STATE_DIR/seen.XXXXXX")
+trap 'rm -f "$new"' EXIT
+failed=0
+for h in $HOSTS; do
+  is_name "$h" || continue
+  addrs=$(getent ahosts "$h" 2>/dev/null | awk '{ print $1 }' | sort -u || true)
+  if [[ -z $addrs ]]; then
+    failed=$((failed + 1))
+    continue
+  fi
+  for a in $addrs; do
+    if is_v4 "$a" || is_v6 "$a"; then echo "$a $now"; fi
+  done
+done > "$new"
+# Merge with what was seen before, newest time per address, and drop what is too old.
+cat "$SEEN" >> "$new"
+awk -v now="$now" -v keep="$KEEP_SECONDS" '
+  $2 ~ /^[0-9]+$/ && (!($1 in t) || $2 > t[$1]) { t[$1] = $2 }
+  END { for (a in t) if (now - t[a] <= keep) print a, t[a] }' "$new" | sort > "$new.merged"
+mv -f "$new.merged" "$SEEN"
+
+v4=() v6=()
+while read -r a _; do
+  if is_v4 "$a"; then v4+=("$a"); elif is_v6 "$a"; then v6+=("$a"); fi
+done < "$SEEN"
+for a in ${fixed[@]+"${fixed[@]}"}; do
+  if is_v4 "$a"; then v4+=("$a"); else v6+=("$a"); fi
+done
+
+if (( ${#v4[@]} + ${#v6[@]} > MAX )); then
+  echo "graphrelay-egress-sync: more than $MAX addresses, refusing to load" >&2
+  exit 1
+fi
+{
+  echo "flush set inet filter egress4"
+  echo "flush set inet filter egress6"
+  (( ${#v4[@]} )) && echo "add element inet filter egress4 { $(join "${v4[@]}") }"
+  (( ${#v6[@]} )) && echo "add element inet filter egress6 { $(join "${v6[@]}") }"
+  true
+} | nft -f -
+
+if [[ ${1:-} == -v || $failed -gt 0 ]]; then
+  echo "graphrelay-egress-sync: ${#v4[@]} IPv4 and ${#v6[@]} IPv6 addresses allowed, ${#dns4[@]}+${#dns6[@]} resolvers, $failed names did not resolve"
+fi

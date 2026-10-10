@@ -302,6 +302,18 @@ last attempt). `graphrelay-fw-report`, run by a systemd timer every 30 seconds, 
 root-owned `/run/graphrelay-fw`; with `firewall.blocked_dir` set, `firewall.ReadBlocked` parses those files
 for the Activity page.
 
+**Outbound limit (optional).** `harden-host.sh --restrict-outbound` writes an output chain with policy
+drop: DNS only to the resolvers from `/etc/resolv.conf` (sets `dns4` / `dns6`), ports 80/443 only to the
+sets `egress4` / `egress6`, plus NTP, DHCP, ICMP and established connections. Because nftables matches
+addresses and the needed services sit behind changing addresses, `graphrelay-egress-sync` (root, started
+by `graphrelay-egress.timer` every 30 seconds and again whenever nftables reloads) resolves a fixed list of
+names (Microsoft sign-in and Graph, Outlook upload hosts, Let's Encrypt, the Cloudflare API, GitHub), the
+package mirrors found in the apt sources and the entries of `/etc/graphrelay/egress-hosts.conf`. Each
+address is remembered with the time it was last seen (`/var/lib/graphrelay-egress/seen`) and kept for a
+day; the sets are replaced in one nft transaction. Refused connections are rejected, not dropped, so
+clients fail over to the next address at once, and their destinations are counted in `egress_blocked4` /
+`egress_blocked6`. On a host without these sets the helper exits without doing anything.
+
 The relay itself runs as an unprivileged user with only `CAP_NET_BIND_SERVICE`.
 
 ## Deployment files (`deploy/`)
@@ -320,6 +332,7 @@ The relay itself runs as an unprivileged user with only `CAP_NET_BIND_SERVICE`.
 | `harden-host.sh` | Debian host hardening: updates, unattended-upgrades, key-only SSH, nftables default-drop with a 120 s automatic rollback |
 | `graphrelay-fw-sync`, `graphrelay-fw.path`, `graphrelay-fw.service` | Firewall allowlist sync (see above) |
 | `graphrelay-fw-report`, `graphrelay-fw-report.service`, `graphrelay-fw-report.timer` | Publish the sources the firewall dropped, for the Activity page |
+| `graphrelay-egress-sync`, `graphrelay-egress.service`, `graphrelay-egress.timer` | Keep the allowed outbound destinations current (see above); inactive unless the outbound limit is enabled |
 
 ### Updates and migrations
 

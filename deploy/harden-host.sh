@@ -3,12 +3,36 @@
 # Run as root on the host:  bash harden-host.sh
 # or from a workstation:    ssh root@relay.example.com 'bash -s' < deploy/harden-host.sh
 # Idempotent. The firewall step rolls itself back after 120 s unless you confirm it from a NEW ssh session.
+#
+#   --restrict-outbound   also limit OUTBOUND traffic to what the relay needs: DNS to this host's
+#                         resolvers, and ports 80/443 to Microsoft, Let's Encrypt, Cloudflare, GitHub
+#                         and the package mirrors (kept current by graphrelay-egress-sync; add your own
+#                         destinations in /etc/graphrelay/egress-hosts.conf). Needs Graph Relay installed.
+#   --open-outbound       remove that limit again
+# Without either option an existing outbound limit is kept.
+#   (over ssh:  ssh root@relay.example.com 'bash -s -- --restrict-outbound' < deploy/harden-host.sh)
 set -euo pipefail
 export LC_ALL=C DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l
 
 # Networks allowed to reach SSH and the portal (8443). The SMTP ports (25/465/587) are closed by default
 # and opened only for the portal's host rules, via graphrelay-fw-sync and the smtp4/smtp6 sets.
 TRUSTED_V4="10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16"
+
+EGRESS=keep
+for arg in "$@"; do
+  case "$arg" in
+    --restrict-outbound) EGRESS=1 ;;
+    --open-outbound) EGRESS=0 ;;
+    *) echo "unknown option $arg" >&2; exit 1 ;;
+  esac
+done
+if [ "$EGRESS" = keep ]; then
+  if grep -q 'set egress4' /etc/nftables.conf 2>/dev/null; then EGRESS=1; else EGRESS=0; fi
+fi
+if [ "$EGRESS" = 1 ] && [ ! -x /usr/local/sbin/graphrelay-egress-sync ]; then
+  echo "--restrict-outbound needs Graph Relay installed first (graphrelay-egress-sync is missing)" >&2
+  exit 1
+fi
 
 echo "== 1. Packages"
 apt-get update -q
@@ -54,6 +78,49 @@ fi
 
 echo "== 3. Firewall (nftables, default drop inbound)"
 cp -n /etc/nftables.conf /root/nftables.conf.orig 2>/dev/null || true
+if [ "$EGRESS" = 1 ]; then
+  # Outbound: only what the relay needs. The resolvers are written into the ruleset so that names
+  # can be resolved right after it loads; graphrelay-egress-sync then fills and refreshes the rest.
+  dns4=$(awk '$1 == "nameserver" && $2 ~ /^[0-9.]+$/ { printf "%s%s", s, $2; s = ", " }' /etc/resolv.conf)
+  dns6=$(awk '$1 == "nameserver" && $2 ~ /:/ { sub(/%.*/, "", $2); printf "%s%s", s, $2; s = ", " }' /etc/resolv.conf)
+  dns4_elements=""
+  dns6_elements=""
+  if [ -n "$dns4" ]; then dns4_elements="elements = { $dns4 }"; fi
+  if [ -n "$dns6" ]; then dns6_elements="elements = { $dns6 }"; fi
+  EGRESS_SETS="
+  # Outbound limit. dns4/dns6: this host's resolvers. egress4/egress6: the services the relay needs,
+  # resolved by graphrelay-egress-sync. egress_blocked*: refused destinations, to see what is missing.
+  set dns4 { type ipv4_addr; $dns4_elements }
+  set dns6 { type ipv6_addr; $dns6_elements }
+  set egress4 { type ipv4_addr; flags interval; auto-merge; }
+  set egress6 { type ipv6_addr; flags interval; auto-merge; }
+  set egress_blocked4 { type ipv4_addr; size 4096; flags dynamic,timeout; counter; timeout 1d; }
+  set egress_blocked6 { type ipv6_addr; size 4096; flags dynamic,timeout; counter; timeout 1d; }"
+  OUTPUT_CHAIN="
+  chain output {
+    type filter hook output priority filter; policy drop;
+    oif lo accept
+    ct state established,related accept
+    meta l4proto icmp accept
+    meta l4proto ipv6-icmp accept
+    ip daddr @dns4 meta l4proto { tcp, udp } th dport 53 accept
+    ip6 daddr @dns6 meta l4proto { tcp, udp } th dport 53 accept
+    udp dport 123 accept
+    udp sport 68 udp dport 67 accept
+    ip daddr @egress4 tcp dport { 80, 443 } accept
+    ip6 daddr @egress6 tcp dport { 80, 443 } accept
+    # Everything else is refused at once (not silently dropped), so programs fail fast and try
+    # the next address; note where it was going.
+    ct state new update @egress_blocked4 { ip daddr }
+    ct state new update @egress_blocked6 { ip6 daddr }
+    meta l4proto tcp reject with tcp reset
+    reject with icmpx type admin-prohibited
+  }"
+else
+  EGRESS_SETS=""
+  OUTPUT_CHAIN="
+  chain output  { type filter hook output priority filter; policy accept; }"
+fi
 cat > /etc/nftables.conf.new <<C
 #!/usr/sbin/nft -f
 # Managed by Graph Relay deploy/harden-host.sh
@@ -66,7 +133,7 @@ table inet filter {
   # Sources whose SMTP connection attempts were dropped, with a packet counter each, kept for a day
   # after the last attempt. graphrelay-fw-report publishes them for the portal's Activity page.
   set smtp_blocked4 { type ipv4_addr; size 4096; flags dynamic,timeout; counter; timeout 1d; }
-  set smtp_blocked6 { type ipv6_addr; size 4096; flags dynamic,timeout; counter; timeout 1d; }
+  set smtp_blocked6 { type ipv6_addr; size 4096; flags dynamic,timeout; counter; timeout 1d; }$EGRESS_SETS
   chain input {
     type filter hook input priority filter; policy drop;
     iif lo accept
@@ -82,8 +149,7 @@ table inet filter {
     tcp dport { 25, 465, 587 } ct state new update @smtp_blocked4 { ip saddr }
     tcp dport { 25, 465, 587 } ct state new update @smtp_blocked6 { ip6 saddr }
   }
-  chain forward { type filter hook forward priority filter; policy drop; }
-  chain output  { type filter hook output priority filter; policy accept; }
+  chain forward { type filter hook forward priority filter; policy drop; }$OUTPUT_CHAIN
 }
 C
 nft -c -f /etc/nftables.conf.new
@@ -96,6 +162,15 @@ nft -f /etc/nftables.conf
 systemctl enable -q nftables
 # Refill the SMTP sets right away if Graph Relay is installed.
 if [ -x /usr/local/sbin/graphrelay-fw-sync ]; then /usr/local/sbin/graphrelay-fw-sync || true; fi
+if [ "$EGRESS" = 1 ]; then
+  /usr/local/sbin/graphrelay-egress-sync -v
+  systemctl enable -q --now graphrelay-egress.timer 2>/dev/null || true
+  echo "Outbound check:"
+  for url in https://login.microsoftonline.com https://graph.microsoft.com https://api.github.com; do
+    if curl -s -o /dev/null -m 10 "$url"; then echo "  reachable   $url"; else echo "  NOT REACHABLE   $url"; fi
+  done
+  echo "Refused destinations show up in:  nft list set inet filter egress_blocked4"
+fi
 
 echo
 echo "Firewall applied. Within 120 s, open a NEW ssh session and run:"

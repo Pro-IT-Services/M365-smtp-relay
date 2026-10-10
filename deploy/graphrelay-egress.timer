@@ -1,0 +1,10 @@
+[Unit]
+Description=Keep Graph Relay's outbound firewall addresses current
+
+[Timer]
+OnBootSec=20s
+OnUnitActiveSec=30s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

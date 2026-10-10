@@ -61,7 +61,7 @@ go vet ./...
 go test ./... -count=1
 # Changes that installed servers don't pick up by themselves need a decision about a migration.
 bash deploy/migrations/guard.sh
-for f in deploy/*.sh deploy/migrations/*.sh deploy/docker/*.sh deploy/graphrelay-fw-sync deploy/graphrelay-fw-report; do
+for f in deploy/*.sh deploy/migrations/*.sh deploy/docker/*.sh deploy/graphrelay-fw-sync deploy/graphrelay-fw-report deploy/graphrelay-egress-sync; do
   bash -n "$f"
 done
 echo "::endgroup::"
@@ -79,6 +79,7 @@ for arch in amd64 arm64; do
            deploy/graphrelay.service deploy/graphrelay.env.example \
            deploy/graphrelay-fw-sync deploy/graphrelay-fw.service deploy/graphrelay-fw.path \
            deploy/graphrelay-fw-report deploy/graphrelay-fw-report.service deploy/graphrelay-fw-report.timer \
+           deploy/graphrelay-egress-sync deploy/graphrelay-egress.service deploy/graphrelay-egress.timer \
            config.example.yaml README.md; do
     cp "$f" "$out/"
   done
@@ -87,7 +88,7 @@ for arch in amd64 arm64; do
   cp docs/*.md "$out/docs/"
   # Which release this is and where it came from; setup.sh uses REPO as the update source.
   printf 'VERSION=%s\nREPO=%s\n' "$VERSION" "${GITHUB_REPOSITORY:-}" > "$out/RELEASE"
-  for f in graphrelay setup.sh update.sh install.sh harden-host.sh graphrelay-fw-sync graphrelay-fw-report \
+  for f in graphrelay setup.sh update.sh install.sh harden-host.sh graphrelay-fw-sync graphrelay-fw-report graphrelay-egress-sync \
            docker/setup.sh docker/update.sh; do
     chmod 0755 "$out/$f"
   done
