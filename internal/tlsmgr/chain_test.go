@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"errors"
+	"io"
 	"math/big"
 	"testing"
 	"time"
@@ -128,3 +129,5 @@ func TestChainSelfSignedNeedsNoFetch(t *testing.T) {
 		t.Fatalf("chain = %v", names(chain))
 	}
 }
+
+func randReader() io.Reader { return rand.Reader }

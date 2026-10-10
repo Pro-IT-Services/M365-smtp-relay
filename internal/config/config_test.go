@@ -34,3 +34,30 @@ portal:
 		}
 	}
 }
+
+func TestFilesModeValidation(t *testing.T) {
+	base := `hostname: relay.example.com
+graph: {tenant_id: t, client_id: c, client_secret: s}
+tls:
+  mode: files
+`
+	for name, tc := range map[string]struct {
+		extra string
+		ok    bool
+	}{
+		"cert and key":         {"  cert_file: /a.pem\n  key_file: /a.key\n", true},
+		"with fallback pair":   {"  cert_file: /a.pem\n  key_file: /a.key\n  fallback_cert_file: /b.pem\n  fallback_key_file: /b.key\n", true},
+		"no files":             {"", false},
+		"key missing":          {"  cert_file: /a.pem\n", false},
+		"half a fallback pair": {"  cert_file: /a.pem\n  key_file: /a.key\n  fallback_cert_file: /b.pem\n", false},
+	} {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte(base+tc.extra), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// No Cloudflare token or ACME e-mail is needed in this mode.
+		if _, err := Load(path); (err == nil) != tc.ok {
+			t.Errorf("%s: err = %v, want ok = %v", name, err, tc.ok)
+		}
+	}
+}

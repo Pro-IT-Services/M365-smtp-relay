@@ -92,6 +92,13 @@ func run(log *slog.Logger, configPath string, resetPW bool) error {
 	for _, w := range tm.Warnings {
 		log.Warn(w)
 	}
+	tm.Notify = func(msg string, problem bool) {
+		if problem {
+			log.Warn(msg)
+		} else {
+			log.Info(msg)
+		}
+	}
 
 	gc := graph.New(cfg.Graph.TenantID, cfg.Graph.ClientID, cfg.Graph.ClientSecret, cfg.Graph.Timeout)
 	go func() {

@@ -215,6 +215,28 @@ Edit `config.yaml`:
 Keep secrets out of the file: `graph.*` and `tls.cloudflare_api_token` already reference `${...}` variables.
 `config.yaml` is ignored by git.
 
+**Your own certificate instead of Let's Encrypt.** If you have a private CA or certificates from another
+source, skip step 5 and use the `files` mode:
+
+```yaml
+tls:
+  mode: files
+  cert_file: /etc/graphrelay/tls/fullchain.pem   # server certificate first, then the intermediates
+  key_file: /etc/graphrelay/tls/privkey.pem
+  # optional, for devices that can't use the first certificate (e.g. RSA next to ECDSA):
+  # fallback_cert_file: /etc/graphrelay/tls/fullchain-rsa.pem
+  # fallback_key_file: /etc/graphrelay/tls/privkey-rsa.pem
+```
+
+- The certificate must list the relay's name (`hostname`) as a DNS name; the relay warns at startup if it
+  doesn't, or if the certificate is expired or about to expire. A key that doesn't match stops it.
+- The files must be readable by the `graphrelay` user and nobody else who shouldn't have the key:
+  `install -d -o root -g graphrelay -m 0750 /etc/graphrelay/tls`, files `root:graphrelay`, mode `0640`.
+- To renew, replace the files (write the new ones next to them and `mv` them into place). The relay picks
+  them up within about a minute, without a restart, and logs "TLS certificate reloaded".
+- Devices need your CA's root certificate in their trust store; distribute it from your CA. The portal's
+  certificate download card is not shown in this mode.
+
 ### 6b. Deploy
 
 From the workstation (needs Go and SSH access as root):
@@ -351,6 +373,7 @@ systemctl restart graphrelay
 | Sign-in: `AADSTS50105` user not assigned | *Assignment required* is on and the user isn't assigned (step 4.2) |
 | Portal: "... is not allowed to manage this relay" | No `Relay.Admin` role in the token: assign it, check nested groups, sign in again in a private window. The journal shows the roles found (`roles=[...]`) |
 | Certificate: `timed out waiting for record to fully propagate` | The network redirects outbound DNS to an internal resolver that doesn't see the Cloudflare TXT record. Set `tls.skip_dns_propagation_check: true` |
+| Log: `TLS certificate files changed but could not be loaded` | `files` mode: the new certificate and key don't match or are unreadable (wrong owner or mode, or a renewal still in progress). The previous certificate stays in use until a valid pair is in place |
 | Certificate: Cloudflare `403` / `9109` | Token lacks `Zone:Read` or `DNS:Edit`, or isn't limited to the right zone |
 | Device reports an SSL/TLS error although the CA is imported | The device may support only RSA cipher suites or only TLS 1.0/1.1. RSA-only devices need `tls.rsa_fallback: true` (the default); the relay requires TLS 1.2 or newer. `LOG_LEVEL=debug` shows handshake errors |
 | Client: connection refused / timeout | No enabled host rule for its IP, so the firewall blocks it: `nft list set inet filter smtp4` and `journalctl -u graphrelay-fw.service` |

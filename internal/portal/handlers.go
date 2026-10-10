@@ -437,8 +437,15 @@ func (p *Portal) settingsData(errMsg string) *settingsView {
 	if c.TLS.ACMEStaging {
 		ca = "Let's Encrypt (staging)"
 	}
-	if c.TLS.Mode == "selfsigned" {
-		ca = "self-signed (testing)"
+	dns := "Cloudflare (DNS-01)"
+	switch c.TLS.Mode {
+	case "selfsigned":
+		ca, dns = "self-signed (testing)", "not used"
+	case "files":
+		ca, dns = "own certificate files ("+c.TLS.CertFile+")", "not used"
+		if c.TLS.FallbackCertFile != "" {
+			ca += ", fallback " + c.TLS.FallbackCertFile
+		}
 	}
 	signIn := "local account only"
 	if ml := c.Portal.MicrosoftLogin; ml.Enabled {
@@ -470,7 +477,7 @@ func (p *Portal) settingsData(errMsg string) *settingsView {
 			{"Hostname", c.Hostname},
 			{"Certificate names", strings.Join(certNames, ", ")},
 			{"Certificate authority", ca},
-			{"DNS provider", "Cloudflare (DNS-01)"},
+			{"DNS provider", dns},
 			{"SMTP listener", orDisabled(c.SMTP.Plain)},
 			{"SMTPS listener", orDisabled(c.SMTP.SMTPS)},
 			{"Submission listener", orDisabled(c.SMTP.Submission)},

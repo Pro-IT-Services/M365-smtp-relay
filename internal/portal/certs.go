@@ -37,7 +37,9 @@ type certRow struct {
 // certChains returns the relay's certificate chains, each completed up to the root where
 // possible. It returns nil when no certificate is available.
 func (p *Portal) certChains(ctx context.Context) []tlsmgr.Chain {
-	if p.TLS == nil {
+	// With the operator's own certificate files there is nothing to hand out: they already
+	// have their CA, and it may be a private one that must not be published here.
+	if p.TLS == nil || p.TLS.Mode == "files" {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)

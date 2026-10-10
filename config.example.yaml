@@ -22,7 +22,8 @@ smtp:
   write_timeout: 2m
 
 tls:
-  # "acme" = Let's Encrypt via Cloudflare DNS-01, renewed automatically.
+  # "acme"       = Let's Encrypt via Cloudflare DNS-01, renewed automatically.
+  # "files"      = your own certificate and key (own CA or any other source), see below.
   # "selfsigned" = throwaway certificate for local testing.
   mode: acme
   acme_email: admin@example.com
@@ -37,6 +38,16 @@ tls:
   # Keep an RSA certificate next to the ECDSA one and serve it to clients that can't use ECDSA.
   # Many printers and scanners only support RSA cipher suites. Costs a second certificate.
   rsa_fallback: true
+
+  # Only for mode "files". PEM files readable by the relay's user. cert_file holds the server
+  # certificate followed by its intermediate certificates (full chain). The files are re-read
+  # when they change, so replacing them on renewal needs no restart. The acme_* and
+  # cloudflare_* settings above are ignored in this mode.
+  # cert_file: /etc/graphrelay/tls/fullchain.pem
+  # key_file: /etc/graphrelay/tls/privkey.pem
+  # Optional second pair for clients that can't use the first, e.g. RSA next to ECDSA:
+  # fallback_cert_file: /etc/graphrelay/tls/fullchain-rsa.pem
+  # fallback_key_file: /etc/graphrelay/tls/privkey-rsa.pem
 
 graph:
   tenant_id: ${GRAPH_TENANT_ID}

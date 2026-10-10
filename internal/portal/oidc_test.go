@@ -97,6 +97,7 @@ type portalEnv struct {
 	entra  *fakeEntra
 	store  *store.Store
 	cfg    *config.Config
+	tls    *tlsmgr.Manager
 }
 
 func newPortalEnv(t *testing.T, ml config.MicrosoftLoginConfig) *portalEnv {
@@ -135,7 +136,7 @@ func newPortalEnv(t *testing.T, ml config.MicrosoftLoginConfig) *portalEnv {
 		Transport:     &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
-	return &portalEnv{url: srv.URL, client: client, entra: entra, store: st, cfg: cfg}
+	return &portalEnv{url: srv.URL, client: client, entra: entra, store: st, cfg: cfg, tls: tm}
 }
 
 // signIn runs the browser side of the flow and returns the callback response.

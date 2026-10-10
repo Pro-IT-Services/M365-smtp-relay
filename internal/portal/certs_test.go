@@ -110,3 +110,26 @@ func TestCertFileName(t *testing.T) {
 		}
 	}
 }
+
+// With the operator's own certificate files, the portal neither lists nor hands out
+// certificates: the CA is theirs and may be private.
+func TestOwnCertificateFilesHideDownloads(t *testing.T) {
+	e := newPortalEnv(t, config.MicrosoftLoginConfig{RequiredRoles: []string{"Relay.Admin"}})
+	resp, _ := e.signIn(t, map[string]any{"roles": []string{"Relay.Admin"}})
+	resp.Body.Close()
+	e.tls.Mode = "files"
+	e.cfg.TLS.Mode, e.cfg.TLS.CertFile = "files", "/etc/graphrelay/tls/fullchain.pem"
+
+	_, page := e.get(t, "/settings")
+	if strings.Contains(page, "TLS certificates") || strings.Contains(page, "/settings/ca-bundle.pem") || strings.Contains(page, "/settings/certs/") {
+		t.Error("settings page still offers certificate downloads")
+	}
+	if !strings.Contains(page, "own certificate files (/etc/graphrelay/tls/fullchain.pem)") || strings.Contains(page, "Cloudflare") {
+		t.Error("settings page doesn't describe the files mode")
+	}
+	for _, path := range []string{"/settings/certs/ecdsa/0/pem", "/settings/certs/rsa/0/der", "/settings/ca-bundle.pem"} {
+		if resp, _ := e.download(t, path); resp.StatusCode != http.StatusNotFound {
+			t.Errorf("%s = %d, want 404", path, resp.StatusCode)
+		}
+	}
+}

@@ -43,8 +43,17 @@ type SMTPConfig struct {
 }
 
 type TLSConfig struct {
-	// "acme" (Let's Encrypt via Cloudflare DNS-01) or "selfsigned" (testing only).
+	// "acme" (Let's Encrypt via Cloudflare DNS-01), "files" (your own certificate and key, from
+	// your own CA or any other source) or "selfsigned" (testing only).
 	Mode string `yaml:"mode"`
+	// "files" mode: PEM files. CertFile holds the server certificate followed by its intermediate
+	// certificates (a "full chain"); KeyFile the matching private key. They are re-read when they
+	// change. The optional fallback pair is served to clients that can't use the first one,
+	// typically an RSA certificate next to an ECDSA one.
+	CertFile         string `yaml:"cert_file"`
+	KeyFile          string `yaml:"key_file"`
+	FallbackCertFile string `yaml:"fallback_cert_file"`
+	FallbackKeyFile  string `yaml:"fallback_key_file"`
 	// Extra names on the certificate besides Hostname.
 	ExtraDomains []string `yaml:"extra_domains"`
 	ACMEEmail    string   `yaml:"acme_email"`
@@ -172,9 +181,16 @@ func (c *Config) validate() error {
 		if c.TLS.ACMEEmail == "" {
 			return fmt.Errorf("tls.acme_email is required for acme mode")
 		}
+	case "files":
+		if c.TLS.CertFile == "" || c.TLS.KeyFile == "" {
+			return fmt.Errorf("tls.cert_file and tls.key_file are required for files mode")
+		}
+		if (c.TLS.FallbackCertFile == "") != (c.TLS.FallbackKeyFile == "") {
+			return fmt.Errorf("tls.fallback_cert_file and tls.fallback_key_file must be set together")
+		}
 	case "selfsigned":
 	default:
-		return fmt.Errorf("tls.mode must be \"acme\" or \"selfsigned\"")
+		return fmt.Errorf("tls.mode must be \"acme\", \"files\" or \"selfsigned\"")
 	}
 	if c.Graph.TenantID == "" || c.Graph.ClientID == "" || c.Graph.ClientSecret == "" {
 		return fmt.Errorf("graph.tenant_id, graph.client_id and graph.client_secret are required")

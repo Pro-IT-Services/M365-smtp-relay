@@ -196,6 +196,13 @@ disk, so a crash cannot lose accepted mail. Devices retry `451` by themselves.
   when `ClientHelloInfo.SupportsCertificate` accepts it and RSA otherwise. Many printers and scanners offer
   only RSA cipher suites and cannot complete a handshake with an ECDSA certificate at all. If the RSA
   certificate cannot be obtained, the relay starts anyway and logs a warning.
+- **`files` mode (`files.go`):** the operator's own certificate chain and key from PEM files, for a private
+  CA or certificates from another source; no ACME or Cloudflare involved. An optional fallback pair plays
+  the role of the RSA certificate. The pair is loaded once at startup (a missing file or a key that doesn't
+  match is fatal; a certificate that doesn't cover the hostname or expires within 14 days is a warning) and
+  re-read when the files' modification time changes, checked at most every 30 seconds during handshakes.
+  A reload that fails, for example a half-written renewal, keeps the certificate in use and is reported
+  once. In this mode the portal offers no certificate downloads: the CA is the operator's and may be private.
 - **`selfsigned` mode:** in-memory ECDSA P-256 and RSA 2048 certificates valid for one year, for testing.
 - The same `tls.Config` (TLS 1.2+) serves STARTTLS, port 465 and the portal.
 - **Chain for download (`chain.go`):** `Manager.Chain` returns the served chain and completes it up to the

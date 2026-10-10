@@ -37,6 +37,9 @@ type Manager struct {
 	// Warnings are non-fatal setup problems (for example the RSA fallback certificate could not
 	// be obtained). The caller should log them.
 	Warnings []string
+	// Notify, if set, receives later events: certificate files reloaded (problem false), or
+	// changed but unreadable (problem true).
+	Notify func(msg string, problem bool)
 
 	primary getCert // ECDSA
 	legacy  getCert // RSA fallback; nil when disabled or unavailable
@@ -71,6 +74,10 @@ func Setup(ctx context.Context, cfg *config.Config) (*Manager, error) {
 		return m, nil
 	}
 
+	if cfg.TLS.Mode == "files" {
+		return m, m.setupFiles(cfg)
+	}
+
 	// Each key type has its own certmagic storage, because certmagic keeps one certificate per name.
 	ec := newMagic(cfg, "certs", certmagic.P256)
 	if err := ec.ManageSync(ctx, domains); err != nil {
@@ -88,6 +95,35 @@ func Setup(ctx context.Context, cfg *config.Config) (*Manager, error) {
 	}
 	m.TLSConfig.NextProtos = []string{"h2", "http/1.1"} // no acme-tls/1, we only do DNS-01
 	return m, nil
+}
+
+// setupFiles loads the operator's own certificate (and the optional fallback) from files.
+// A missing file or a key that doesn't match its certificate is fatal; a certificate that
+// doesn't cover the hostname or is about to expire only produces a warning.
+func (m *Manager) setupFiles(cfg *config.Config) error {
+	notify := func(msg string, problem bool) {
+		if m.Notify != nil {
+			m.Notify(msg, problem)
+		}
+	}
+	main, err := loadFileCert(cfg.TLS.CertFile, cfg.TLS.KeyFile)
+	if err != nil {
+		return fmt.Errorf("tls files mode: %w", err)
+	}
+	main.notify = notify
+	m.primary = main.get
+	m.Warnings = append(m.Warnings, certWarnings(main.cert.Leaf, cfg.TLS.CertFile, cfg.Hostname)...)
+
+	if cfg.TLS.FallbackCertFile != "" {
+		fb, err := loadFileCert(cfg.TLS.FallbackCertFile, cfg.TLS.FallbackKeyFile)
+		if err != nil {
+			return fmt.Errorf("tls files mode, fallback certificate: %w", err)
+		}
+		fb.notify = notify
+		m.legacy = fb.get
+		m.Warnings = append(m.Warnings, certWarnings(fb.cert.Leaf, cfg.TLS.FallbackCertFile, cfg.Hostname)...)
+	}
+	return nil
 }
 
 // newMagic returns a certmagic configuration that obtains certificates of the given key type

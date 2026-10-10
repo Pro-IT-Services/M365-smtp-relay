@@ -11,7 +11,9 @@ is disabled or unwanted.
 - **Allowed sender mailboxes**: an admin-managed list of the only mailboxes rules may send as.
 - **Messages up to 150 MB**: small ones as raw MIME, large ones as a Graph draft with upload sessions.
 - **Synchronous delivery, no queue**: the client gets `250` only after Graph accepted the message.
-- **TLS certificates** from Let's Encrypt via the Cloudflare DNS-01 challenge, renewed automatically.
+- **TLS certificates** from Let's Encrypt via the Cloudflare DNS-01 challenge, renewed automatically, or your
+  own certificate and key from files (private CA or any other source), reloaded when they change. An RSA
+  certificate is kept next to the ECDSA one for older devices.
 - **HTTPS management portal**: hosts, allowed mailboxes, message log, test send, settings; sign-in with
   Microsoft (Entra ID app role) and an optional break-glass local account.
 - **Firewall integration** (optional, Linux/nftables): the SMTP ports open only for the hosts in the portal.
