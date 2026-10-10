@@ -1,12 +1,19 @@
 #!/bin/bash
-# Install or upgrade Graph Relay on a Debian host. Run as root from a directory holding:
-#   graphrelay (linux/amd64 binary), config.yaml, graphrelay.service, graphrelay.env.example,
+# Install or upgrade Graph Relay on a Debian host. Run as root in the extracted release archive,
+# after copying config.example.yaml to config.yaml and editing it. The directory must hold:
+#   graphrelay (the binary), config.yaml, graphrelay.service, graphrelay.env.example,
 #   graphrelay-fw-sync, graphrelay-fw.service, graphrelay-fw.path,
 #   graphrelay-fw-report, graphrelay-fw-report.service, graphrelay-fw-report.timer
 # An existing /opt/graphrelay/config.yaml and /etc/graphrelay.env are never overwritten.
 # The service is started only once /etc/graphrelay.env has all values filled in.
 set -euo pipefail
 cd "$(dirname "$0")"
+
+if [ ! -e /opt/graphrelay/config.yaml ] && [ ! -e config.yaml ]; then
+  echo "No config.yaml here and none installed yet." >&2
+  echo "Copy config.example.yaml to config.yaml, edit it, then run this script again." >&2
+  exit 1
+fi
 
 id graphrelay >/dev/null 2>&1 || useradd --system --home-dir /opt/graphrelay --shell /usr/sbin/nologin graphrelay
 

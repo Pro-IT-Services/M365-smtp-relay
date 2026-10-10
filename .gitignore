@@ -13,6 +13,7 @@
 !/internal/
 !/deploy/
 !/docs/
+!/.github/
 
 # Never commit inside the allowed folders either.
 *.env

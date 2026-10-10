@@ -33,6 +33,7 @@ allowlist exporter. All state lives in one SQLite file and a certificate directo
 | `internal/store` | SQLite persistence: hosts, settings, message log, migrations |
 | `internal/firewall` | Writes the enabled host rules as an IP allowlist file |
 | `deploy/` | systemd units, installer, host hardening, firewall sync, deploy script |
+| `.github/` | Release workflow and its build and publish scripts |
 | `config.example.yaml` | Annotated configuration template |
 
 ## Startup (`cmd/graphrelay/main.go`)
@@ -301,10 +302,29 @@ The relay itself runs as an unprivileged user with only `CAP_NET_BIND_SERVICE`.
 | `graphrelay.service` | systemd unit: user `graphrelay`, `CAP_NET_BIND_SERVICE` only, `ProtectSystem=strict`, writes only to `/opt/graphrelay`, secrets from `/etc/graphrelay.env`, restart after 30 s |
 | `graphrelay.env.example` | Template for `/etc/graphrelay.env` (mode 0600) |
 | `install.sh` | Creates the user and directories, installs binary and units; never overwrites an existing config or env file; starts the service only when the env file is filled |
-| `push.sh` | From a workstation: builds the Linux binary and ships it together with all current deploy files, then runs `install.sh` |
+| `push.sh` | For development, from a workstation: builds the Linux binary and ships it together with all current deploy files, then runs `install.sh`. Normal installs use the release archive |
 | `harden-host.sh` | Debian host hardening: updates, unattended-upgrades, key-only SSH, nftables default-drop with a 120 s automatic rollback |
 | `graphrelay-fw-sync`, `graphrelay-fw.path`, `graphrelay-fw.service` | Firewall allowlist sync (see above) |
 | `graphrelay-fw-report`, `graphrelay-fw-report.service`, `graphrelay-fw-report.timer` | Publish the sources the firewall dropped, for the Activity page |
+
+## Release build (`.github/`)
+
+`.github/workflows/build.yml` runs on a self-hosted runner that only needs Docker. Pushes to `main` are
+tested and built; a version tag (`v*`) is also published as a GitHub release. Pull requests are not built,
+because a self-hosted runner must not execute code from forks.
+
+- **`build` job:** starts a throwaway `debian:stable-slim` container with the checkout mounted and runs
+  `.github/scripts/build.sh` in it. The script installs the newest stable Go from go.dev (checked against
+  the published SHA-256), runs `go mod verify`, the gofmt check, `go vet` and `go test`, then builds static
+  `linux/amd64` and `linux/arm64` binaries and packs each with the installer, units, helpers,
+  `config.example.yaml` and the docs into `graphrelay_<version>_linux_<arch>.tar.gz`, plus `SHA256SUMS`.
+  The archives are kept as a workflow artifact.
+- **`release` job** (tags only, `contents: write`): fetches the artifact, verifies the checksums and runs
+  `.github/scripts/release.sh` in a container, which creates the release through the GitHub API (or reuses
+  it on a re-run) and uploads the files. The token is only given to this job, not to the one that runs tests.
+- **Cleanup:** each job ends with a step that always runs: it removes its container, removes the image if
+  the job pulled it, and empties the workspace. Go, its caches and the dependencies only ever existed
+  inside the container.
 
 ## Tests
 

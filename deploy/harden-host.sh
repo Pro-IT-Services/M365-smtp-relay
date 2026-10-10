@@ -1,6 +1,7 @@
 #!/bin/bash
 # Update and harden the Graph Relay host (Debian 13 LXC).
-# Run as root, e.g. from a workstation:  ssh root@relay.example.com 'bash -s' < deploy/harden-host.sh
+# Run as root on the host:  bash harden-host.sh
+# or from a workstation:    ssh root@relay.example.com 'bash -s' < deploy/harden-host.sh
 # Idempotent. The firewall step rolls itself back after 120 s unless you confirm it from a NEW ssh session.
 set -euo pipefail
 export LC_ALL=C DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l

@@ -11,7 +11,7 @@ your own. For how the code works, see [architecture.md](architecture.md).
 | 3 | Mail permissions limited to the relay mailboxes | Exchange Online |
 | 4 | Portal admin role | Microsoft Entra admin center |
 | 5 | TLS certificate: automatic via Cloudflare, or your own | Cloudflare, or your CA |
-| 6 | Install, configure, start | server |
+| 6 | Download the release, configure, install, start | server |
 | 7 | First sign-in, mailboxes, host rules, test | portal |
 | 8 | Optional SMTP login per host | portal + device |
 | 9–11 | Break-glass login, maintenance, troubleshooting | |
@@ -35,18 +35,18 @@ Exchange permission changes to take effect.
   **Cloudflare**; otherwise bring your own certificate. Section 5 covers both.
 
 Optional: harden a fresh Debian host (updates, automatic security updates, key-only SSH, default-drop
-firewall). Read [`deploy/harden-host.sh`](../deploy/harden-host.sh) first; adjust `TRUSTED_V4` (networks
-allowed to reach SSH and the portal), then run it from your workstation:
+firewall). The script `harden-host.sh` is in the release archive (step 6a). Read it first and adjust
+`TRUSTED_V4` (networks allowed to reach SSH and the portal), then run it on the server as root:
 
 ```bash
-ssh root@relay.example.com 'bash -s' < deploy/harden-host.sh
+bash harden-host.sh
 ```
 
-The firewall step rolls itself back after 120 seconds. Within that time, confirm from a **new** SSH session
-that you can still log in:
+The firewall step rolls itself back after 120 seconds. Within that time, open a **new** SSH session to the
+server, which proves you can still log in, and confirm there:
 
 ```bash
-ssh root@relay.example.com systemctl stop nft-rollback.timer
+systemctl stop nft-rollback.timer
 ```
 
 ## 2. App registration and client secret (Entra ID)
@@ -203,12 +203,12 @@ use option B. The relay's own DNS record does not have to be public in either ca
 curl -s -H "Authorization: Bearer <token>" https://api.cloudflare.com/client/v4/user/tokens/verify
 ```
 
-In `config.yaml` (step 6a) keep `tls.mode: acme` and set `tls.acme_email`.
+In `config.yaml` (step 6b) keep `tls.mode: acme` and set `tls.acme_email`.
 
 ### 5b. Option B: your own certificate and key
 
 No Cloudflare account, token or Let's Encrypt is involved. Put the files on the server and point the relay
-at them in `config.yaml` (step 6a):
+at them in `config.yaml` (step 6b):
 
 ```yaml
 tls:
@@ -224,8 +224,8 @@ tls:
   doesn't, or if the certificate is expired or about to expire. A key that doesn't match stops it.
 - The files must be readable by the `graphrelay` user and nobody else who shouldn't have the key:
   `install -d -o root -g graphrelay -m 0750 /etc/graphrelay/tls`, files `root:graphrelay`, mode `0640`.
-  That user is created by the installer, so put the files in place after step 6b and before starting the
-  relay (6d).
+  That user is created by the installer, so put the files in place after step 6c and before starting the
+  relay (6e).
 - To renew, replace the files (write the new ones next to them and `mv` them into place). The relay picks
   them up within about a minute, without a restart, and logs "TLS certificate reloaded".
 - Devices need your CA's root certificate in their trust store; distribute it from your CA. The portal's
@@ -233,15 +233,40 @@ tls:
 
 ## 6. Install, configure, start
 
-### 6a. Configuration file
+### 6a. Download the release
 
-On your workstation, in the repository:
+Releases are built by the repository's GitHub Actions workflow and published on the repository's
+**Releases** page. Each release has one archive per CPU architecture and a `SHA256SUMS` file. An archive
+contains the `graphrelay` binary, the installer, the systemd units, the firewall helpers, the hardening
+script, `config.example.yaml` and this documentation, so the server needs neither Go nor the repository.
+
+On the server, as root (replace `OWNER/REPO` and the version; use `arm64` instead of `amd64` on ARM):
+
+```bash
+VERSION=v1.0.0
+BASE=https://github.com/OWNER/REPO/releases/download/$VERSION
+cd /root
+curl -fLO "$BASE/graphrelay_${VERSION}_linux_amd64.tar.gz"
+curl -fLO "$BASE/SHA256SUMS"
+sha256sum -c --ignore-missing SHA256SUMS      # must print: OK
+tar -xzf "graphrelay_${VERSION}_linux_amd64.tar.gz"
+cd "graphrelay_${VERSION}_linux_amd64"
+```
+
+If the repository is private, those URLs need a login: download the archive and `SHA256SUMS` from the
+Releases page in your browser (or with `gh release download $VERSION -R OWNER/REPO`), copy them to the server
+with `scp`, then continue from the `sha256sum` line.
+
+### 6b. Configuration file
+
+In the extracted directory:
 
 ```bash
 cp config.example.yaml config.yaml
+nano config.yaml
 ```
 
-Edit `config.yaml`:
+Set at least:
 
 | Setting | Value |
 |---|---|
@@ -258,26 +283,25 @@ Edit `config.yaml`:
 | `firewall.allowlist_file` | `/opt/graphrelay/data/firewall-allowlist.txt` if you use the nftables integration |
 | `firewall.blocked_dir` | `/run/graphrelay-fw` to show firewall-blocked addresses on the Activity page (needs the ruleset from `harden-host.sh`) |
 
-Keep secrets out of the file: `graph.*` and `tls.cloudflare_api_token` already reference `${...}` variables.
-`config.yaml` is ignored by git.
+Keep secrets out of the file: `graph.*` and `tls.cloudflare_api_token` already reference `${...}` variables
+that are read from `/etc/graphrelay.env` (step 6d).
 
-### 6b. Deploy
+### 6c. Install
 
-From the workstation (needs Go and SSH access as root):
+Still in the extracted directory:
 
 ```bash
-CONFIG=config.yaml deploy/push.sh root@relay.example.com
+bash install.sh
 ```
 
-This builds the Linux binary, copies it with all `deploy/` files and runs `install.sh` on the server, which
-creates the `graphrelay` user and `/opt/graphrelay`, installs the systemd units and the firewall sync, and
-copies the config only if the server has none yet. Without the push script, copy the binary, `config.yaml`
-and the `deploy/` files into one directory on the server and run `bash install.sh` there.
+The installer creates the `graphrelay` user and `/opt/graphrelay`, installs the binary, your `config.yaml`,
+the systemd units and the firewall helpers, and creates an empty `/etc/graphrelay.env`. It never overwrites
+an existing `config.yaml` or env file, and it starts the relay only once the env file is filled in. With
+`tls.mode: files`, put your certificate and key in place now (step 5b).
 
-### 6c. Secrets
+### 6d. Secrets
 
 ```bash
-ssh root@relay.example.com
 nano /etc/graphrelay.env       # root:root, mode 0600
 ```
 
@@ -290,7 +314,7 @@ GRAPH_CLIENT_SECRET=...
 
 No spaces around `=`, no quotes.
 
-### 6d. Start
+### 6e. Start
 
 ```bash
 systemctl start graphrelay
@@ -380,9 +404,31 @@ systemctl restart graphrelay
 | Own certificate (`files` mode) | Before it expires | Replace the certificate and key files (step 5b); no restart needed |
 | TLS certificate (`acme` mode) | Automatic | Renewed about 30 days before expiry |
 | OS updates | Automatic | `unattended-upgrades` (set up by `harden-host.sh`) |
-| Relay upgrade | When needed | `CONFIG=config.yaml deploy/push.sh root@relay.example.com`; config, env file and database are kept |
+| Relay upgrade | When a new release is published | Download and extract the new release (step 6a) and run `bash install.sh` in it. Config, env file, database and certificates are kept; the relay restarts |
 | Backup | Regularly | `/opt/graphrelay/data/` (database, certificates) and `/etc/graphrelay.env` restore everything |
 | Message log | Automatic | Rows older than `log_retention_days` (default 30) are deleted |
+
+### Building it yourself
+
+You only need this to change the code. With Go installed:
+
+```bash
+go test ./...
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-s -w" -o graphrelay ./cmd/graphrelay
+CONFIG=config.yaml deploy/push.sh root@relay.example.com   # build, copy and install in one step
+```
+
+To publish a release, push a version tag; the workflow in `.github/workflows/build.yml` tests, builds and
+publishes it:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+The workflow runs on a self-hosted runner that has Docker. It starts a throwaway Debian container, installs
+the newest stable Go in it, verifies the dependencies, runs the format check, `go vet` and all tests, builds
+the `amd64` and `arm64` archives, and removes the container, the image it pulled and its workspace when done.
 
 ## 11. Troubleshooting
 

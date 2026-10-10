@@ -48,6 +48,14 @@ go run ./cmd/graphrelay -config config.yaml
 The portal is then at `https://localhost:8443` (self-signed certificate). The first start prints a generated
 admin password. Sending fails at the Graph step with a clear error, which is expected without a real tenant.
 
+## Install
+
+Download the archive for your server from the repository's **Releases** page, check it against
+`SHA256SUMS`, extract it, copy `config.example.yaml` to `config.yaml` and edit it, then run `bash install.sh`
+as root. The archive contains the binary, the installer, the systemd units and the documentation; the server
+needs neither Go nor this repository. [docs/setup.md](docs/setup.md) has every step, including the
+Microsoft 365 side.
+
 ## Build and test
 
 ```bash
@@ -56,4 +64,6 @@ go vet ./... && gofmt -l .
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-s -w" -o graphrelay ./cmd/graphrelay
 ```
 
-A `Dockerfile` is included as well.
+Releases are built by `.github/workflows/build.yml`: pushing a version tag (`v1.2.3`) tests and builds
+inside a throwaway container with the newest stable Go and publishes the archives. A `Dockerfile` is
+included as well.
