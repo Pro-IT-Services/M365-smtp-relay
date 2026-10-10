@@ -1,11 +1,13 @@
 #!/bin/bash
-# Publish dist/ as a GitHub release for the tag $VERSION. Runs inside a throwaway Debian
-# container; it only needs curl and jq, so nothing has to be installed on the runner.
+# Publish the archives in $DIST as a GitHub release for the tag $VERSION. Runs inside a throwaway
+# Debian container; it only needs curl and jq, so nothing has to be installed on the runner.
+# The workflow runs a copy of this script that was set aside before the build, with only the
+# archives mounted: nothing the build could have modified is executed while the token is present.
 #
-#   VERSION, GITHUB_REPOSITORY (owner/name), GITHUB_TOKEN (contents: write)
+#   VERSION, GITHUB_REPOSITORY (owner/name), GITHUB_TOKEN (contents: write), DIST (default: dist)
 set -euo pipefail
 : "${VERSION:?}" "${GITHUB_REPOSITORY:?}" "${GITHUB_TOKEN:?}"
-cd "$(dirname "$0")/../.."
+DIST=${DIST:-dist}
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
@@ -15,7 +17,8 @@ api="https://api.github.com/repos/$GITHUB_REPOSITORY"
 gh() { curl -fsS -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" "$@"; }
 
-ls dist/graphrelay_*.tar.gz dist/SHA256SUMS >/dev/null
+ls "$DIST"/graphrelay_*.tar.gz "$DIST/SHA256SUMS" >/dev/null
+(cd "$DIST" && sha256sum -c SHA256SUMS)
 
 # Reuse the release if this tag was already published (a re-run), otherwise create it.
 # A tag with a hyphen (v1.2.0-rc1) is marked as a pre-release.
@@ -30,7 +33,7 @@ else
 fi
 id=$(jq -r .id <<<"$release")
 
-for file in dist/graphrelay_*.tar.gz dist/SHA256SUMS; do
+for file in "$DIST"/graphrelay_*.tar.gz "$DIST/SHA256SUMS"; do
   name=$(basename "$file")
   old=$(jq -r --arg n "$name" '.assets[]? | select(.name == $n) | .id' <<<"$release")
   if [ -n "$old" ]; then

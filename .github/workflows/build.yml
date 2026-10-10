@@ -4,11 +4,15 @@ name: Build and release
 # GitHub release with the archives and their checksums.
 #
 # Everything runs inside throwaway Debian containers on a self-hosted runner. The runner only needs
-# Docker: the container fetches the source and installs the newest stable Go itself, and the job
-# removes its containers, the image (if the job pulled it) and its workspace when it ends.
+# Docker: the containers fetch the source and install the newest stable Go themselves, and the job
+# removes its containers, the image (if the job pulled it) and its files when it ends.
 #
 # No external actions are used (not even actions/checkout), so the workflow also runs where the
 # Actions policy only allows actions from the repository itself.
+#
+# The build container runs the tests and third-party dependency code, so it is kept away from the
+# write token: it gets no token, sees the source read-only and can only write the archives. The
+# release script is set aside before the build and runs without access to the workspace.
 #
 # Pull requests are deliberately not built: a self-hosted runner must not run code from forks.
 
@@ -40,6 +44,11 @@ jobs:
         run: |
           # Start from an empty workspace, whatever an earlier job left behind.
           find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+          # A private area outside the workspace for the archives and the release script.
+          work="$RUNNER_TEMP/$CONTAINER"
+          rm -rf "$work"
+          mkdir -p "$work/dist" "$work/scripts"
+          echo "WORK=$work" >> "$GITHUB_ENV"
           if [ "$GITHUB_REF_TYPE" = tag ]; then
             echo "version=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
           else
@@ -73,15 +82,17 @@ jobs:
               git checkout -q FETCH_HEAD
               git log -1 --format="checked out %h %s"
             '
+          # Set the release script aside now, before any build code runs.
+          cp "$GITHUB_WORKSPACE/.github/scripts/release.sh" "$WORK/scripts/release.sh"
 
       - name: Test and build (in a container)
         env:
           VERSION: ${{ steps.prep.outputs.version }}
         run: |
-          # No token in here: this container runs the tests and the dependencies' code.
+          # No token, source read-only, archives written to a separate directory.
           docker run --rm --name "$CONTAINER-build" \
-            -v "$GITHUB_WORKSPACE:/src" -w /src \
-            -e VERSION -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+            -v "$GITHUB_WORKSPACE:/src:ro" -v "$WORK/dist:/out" -w /src \
+            -e VERSION -e DIST=/out -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
             "$IMAGE" bash .github/scripts/build.sh
 
       - name: Publish the release (in a container)
@@ -90,10 +101,11 @@ jobs:
           VERSION: ${{ steps.prep.outputs.version }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Only the script set aside earlier and the archives are mounted, both read-only.
           docker run --rm --name "$CONTAINER-release" \
-            -v "$GITHUB_WORKSPACE:/src" -w /src \
-            -e VERSION -e GITHUB_REPOSITORY -e GITHUB_TOKEN \
-            "$IMAGE" bash .github/scripts/release.sh
+            -v "$WORK/scripts:/scripts:ro" -v "$WORK/dist:/dist:ro" \
+            -e VERSION -e GITHUB_REPOSITORY -e GITHUB_TOKEN -e DIST=/dist \
+            "$IMAGE" bash /scripts/release.sh
 
       - name: Clean up
         if: always()
@@ -106,5 +118,6 @@ jobs:
             docker image rm "$IMAGE" >/dev/null 2>&1 || true
           fi
           docker image prune -f >/dev/null 2>&1 || true
-          # Empty the workspace, including hidden files.
+          # Remove the archives, the script copy and everything in the workspace, hidden files included.
+          rm -rf "$RUNNER_TEMP/$CONTAINER" 2>/dev/null || true
           find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true

@@ -1,19 +1,24 @@
 #!/bin/bash
-# Test and build Graph Relay, and package the release archives into dist/.
+# Test and build Graph Relay, and package the release archives into $DIST (default: dist/).
 # Meant to run as root inside a throwaway Debian container (see .github/workflows/build.yml):
 # it installs the newest stable Go itself, so nothing has to be preinstalled on the runner.
 #
 #   VERSION     version string baked into the binary and the archive names (required)
-#   HOST_UID/HOST_GID  owner to give the files in the mounted workspace when done
+#   DIST        output directory. In the workflow the source is mounted read-only and this is a
+#               separate mount, so the build cannot change the checked-out source or scripts.
+#   HOST_UID/HOST_GID  owner to give the output files when done
 #   SKIP_SETUP=1       use the Go already on PATH instead of installing it (local runs)
 set -euo pipefail
 : "${VERSION:?VERSION is required}"
 SRC=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$SRC"
+DIST=${DIST:-$SRC/dist}
+mkdir -p "$DIST"
+DIST=$(cd "$DIST" && pwd)
 
-# The workspace is mounted from the runner. Whatever root creates in it must be handed back to
-# the runner's user, or the runner could not clean up after the job.
-trap 'chown -R "${HOST_UID:-0}:${HOST_GID:-0}" "$SRC" 2>/dev/null || true' EXIT
+# The output directory is mounted from the runner. Whatever root creates in it must be handed
+# back to the runner's user, or the runner could not clean up after the job.
+trap 'chown -R "${HOST_UID:-0}:${HOST_GID:-0}" "$DIST" 2>/dev/null || true' EXIT
 
 if [ "${SKIP_SETUP:-0}" != 1 ]; then
   echo "::group::Install tools and the newest stable Go"
@@ -57,23 +62,25 @@ go test ./... -count=1
 echo "::endgroup::"
 
 echo "::group::Build and package $VERSION"
-rm -rf dist
-mkdir -p dist
+find "$DIST" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
 for arch in amd64 arm64; do
   name="graphrelay_${VERSION}_linux_${arch}"
-  mkdir -p "dist/$name/docs"
-  GOOS=linux GOARCH=$arch go build -trimpath -ldflags "-s -w -X main.version=$VERSION" \
-    -o "dist/$name/graphrelay" ./cmd/graphrelay
+  out="$DIST/$name"
+  mkdir -p "$out/docs"
+  GOOS=linux GOARCH=$arch go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$out/graphrelay" ./cmd/graphrelay
   # Everything install.sh needs, so the archive installs on a server without the repository.
-  cp deploy/install.sh deploy/harden-host.sh deploy/graphrelay.service deploy/graphrelay.env.example \
-     deploy/graphrelay-fw-sync deploy/graphrelay-fw.service deploy/graphrelay-fw.path \
-     deploy/graphrelay-fw-report deploy/graphrelay-fw-report.service deploy/graphrelay-fw-report.timer \
-     config.example.yaml README.md "dist/$name/"
-  cp docs/*.md "dist/$name/docs/"
-  chmod 0755 "dist/$name/graphrelay" "dist/$name/install.sh" "dist/$name/harden-host.sh" \
-             "dist/$name/graphrelay-fw-sync" "dist/$name/graphrelay-fw-report"
-  tar -C dist --owner=0 --group=0 --numeric-owner -czf "dist/$name.tar.gz" "$name"
-  rm -rf "dist/$name"
+  for f in deploy/install.sh deploy/harden-host.sh deploy/graphrelay.service deploy/graphrelay.env.example \
+           deploy/graphrelay-fw-sync deploy/graphrelay-fw.service deploy/graphrelay-fw.path \
+           deploy/graphrelay-fw-report deploy/graphrelay-fw-report.service deploy/graphrelay-fw-report.timer \
+           config.example.yaml README.md; do
+    cp "$f" "$out/"
+  done
+  cp docs/*.md "$out/docs/"
+  for f in graphrelay install.sh harden-host.sh graphrelay-fw-sync graphrelay-fw-report; do
+    chmod 0755 "$out/$f"
+  done
+  tar -C "$DIST" --owner=0 --group=0 --numeric-owner -czf "$DIST/$name.tar.gz" "$name"
+  rm -rf "$out"
 done
-(cd dist && sha256sum graphrelay_*.tar.gz > SHA256SUMS && cat SHA256SUMS)
+(cd "$DIST" && sha256sum graphrelay_*.tar.gz > SHA256SUMS && cat SHA256SUMS)
 echo "::endgroup::"
