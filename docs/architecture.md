@@ -326,9 +326,12 @@ policy only allows actions from the repository itself. One job does everything, 
    This container runs the tests and the dependencies' code, so it gets no token, sees the source
    read-only and can only write to the separate output directory.
 3. **Publish** (tags only): runs the copy of `release.sh` set aside in step 1, with only that script and
-   the archives mounted, both read-only. It verifies the checksums, creates the release through the GitHub
-   API (or reuses it on a re-run) and uploads the files. Nothing the build could have changed is executed
-   while the write token is present.
+   the archives mounted, both read-only. Nothing the build could have changed is executed while the write
+   token is present, and the output directory is not trusted beyond the bytes of the expected files: the
+   workflow first deletes anything in it that is not a plain file, and the script uploads only the three
+   fixed file names, refuses symlinks, requires `SHA256SUMS` to list exactly the two archives and to match,
+   and hands the token to curl through a private file instead of the environment. It then creates the
+   release through the GitHub API (or reuses it on a re-run) and uploads the files.
 
 A final step that always runs removes the containers, removes the image if the job pulled it, and empties
 the workspace. Go, its caches and the dependencies only ever existed inside a container.

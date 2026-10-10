@@ -101,6 +101,9 @@ jobs:
           VERSION: ${{ steps.prep.outputs.version }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # The build container wrote this directory. Drop anything that is not a plain file
+          # (symlinks, devices, directories) before a container with the token reads from it.
+          find "$WORK/dist" -mindepth 1 ! -type f -print -delete
           # Only the script set aside earlier and the archives are mounted, both read-only.
           docker run --rm --name "$CONTAINER-release" \
             -v "$WORK/scripts:/scripts:ro" -v "$WORK/dist:/dist:ro" \
