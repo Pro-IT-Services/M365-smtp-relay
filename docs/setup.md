@@ -10,14 +10,15 @@ your own. For how the code works, see [architecture.md](architecture.md).
 | 2 | App registration, client secret | Microsoft Entra admin center |
 | 3 | Mail permissions limited to the relay mailboxes | Exchange Online |
 | 4 | Portal admin role | Microsoft Entra admin center |
-| 5 | API token for the certificate | Cloudflare |
+| 5 | TLS certificate: automatic via Cloudflare, or your own | Cloudflare, or your CA |
 | 6 | Install, configure, start | server |
 | 7 | First sign-in, mailboxes, host rules, test | portal |
 | 8 | Optional SMTP login per host | portal + device |
 | 9–11 | Break-glass login, maintenance, troubleshooting | |
 
-You need: Application Administrator (or Global Administrator) in Entra ID, Exchange Administrator, access to
-the Cloudflare zone of your domain, and root on a Linux server. Plan about an hour, plus up to 2 hours for
+You need: Application Administrator (or Global Administrator) in Entra ID, Exchange Administrator, root on
+a Linux server, and for the TLS certificate **either** your domain's DNS zone in Cloudflare (automatic
+Let's Encrypt certificate) **or** your own certificate and key (section 5). Plan about an hour, plus up to 2 hours for
 Exchange permission changes to take effect.
 
 ---
@@ -25,13 +26,13 @@ Exchange permission changes to take effect.
 ## 1. Server and DNS name
 
 - A Linux server or container (the deploy scripts target **Debian 12/13** with systemd and nftables) with
-  outbound HTTPS to `login.microsoftonline.com`, `graph.microsoft.com`, `api.cloudflare.com` and Let's
-  Encrypt. No inbound access from the internet is needed.
+  outbound HTTPS to `login.microsoftonline.com` and `graph.microsoft.com`, plus `api.cloudflare.com` and
+  Let's Encrypt if the certificate is obtained automatically. No inbound access from the internet is needed.
 - A DNS name for the relay, e.g. `relay.example.com` → `10.0.0.25`. Clients and admins use it. For a private
   address, prefer an internal DNS record; if you put it into public DNS at Cloudflare, use **DNS only**
   (grey cloud), never proxied.
-- The domain's DNS zone must be hosted at **Cloudflare**, which is how the TLS certificate is obtained (DNS-01).
-  The relay name itself does not need to be public.
+- A TLS certificate for that name. For the automatic one, the domain's DNS zone must be hosted at
+  **Cloudflare**; otherwise bring your own certificate. Section 5 covers both.
 
 Optional: harden a fresh Debian host (updates, automatic security updates, key-only SSH, default-drop
 firewall). Read [`deploy/harden-host.sh`](../deploy/harden-host.sh) first; adjust `TRUSTED_V4` (networks
@@ -173,7 +174,23 @@ Only users holding the app role **Relay.Admin** can sign in to the portal.
 3. Recommended: **Enterprise applications →** your app **→ Properties → Assignment required? = Yes**.
 4. Conditional Access and MFA policies apply to this sign-in like to any other app.
 
-## 5. Cloudflare API token
+## 5. TLS certificate: automatic (Cloudflare) or your own
+
+The relay needs a certificate for its name (`relay.example.com`). Choose one of two ways.
+
+| | A. Automatic (Let's Encrypt) | B. Your own certificate |
+|---|---|---|
+| Needs | **The domain's DNS zone hosted at Cloudflare**, and an API token for it | A certificate and key for the relay's name, from your own CA or any other source |
+| Renewal | Automatic, by the relay | You replace the files; the relay reloads them |
+| Trusted by devices | Yes, publicly trusted (old devices may need the root imported, see section 8) | Only by devices that have your CA's root certificate |
+| `tls.mode` | `acme` | `files` |
+
+**Cloudflare is only required for option A.** The relay proves control of the name to Let's Encrypt by
+creating a temporary DNS record through the Cloudflare API (DNS-01 challenge), so the zone of your domain
+(`example.com`) must be managed in Cloudflare. If your DNS is hosted elsewhere and you don't want to move it,
+use option B. The relay's own DNS record does not have to be public in either case.
+
+### 5a. Option A: Cloudflare API token
 
 1. <https://dash.cloudflare.com> → profile → **My Profile → API Tokens → Create Token** → template
    **Edit zone DNS** → **Use template**.
@@ -185,6 +202,34 @@ Only users holding the app role **Relay.Admin** can sign in to the portal.
 ```bash
 curl -s -H "Authorization: Bearer <token>" https://api.cloudflare.com/client/v4/user/tokens/verify
 ```
+
+In `config.yaml` (step 6a) keep `tls.mode: acme` and set `tls.acme_email`.
+
+### 5b. Option B: your own certificate and key
+
+No Cloudflare account, token or Let's Encrypt is involved. Put the files on the server and point the relay
+at them in `config.yaml` (step 6a):
+
+```yaml
+tls:
+  mode: files
+  cert_file: /etc/graphrelay/tls/fullchain.pem   # server certificate first, then the intermediates
+  key_file: /etc/graphrelay/tls/privkey.pem
+  # optional, for devices that can't use the first certificate (e.g. RSA next to ECDSA):
+  # fallback_cert_file: /etc/graphrelay/tls/fullchain-rsa.pem
+  # fallback_key_file: /etc/graphrelay/tls/privkey-rsa.pem
+```
+
+- The certificate must list the relay's name (`hostname`) as a DNS name; the relay warns at startup if it
+  doesn't, or if the certificate is expired or about to expire. A key that doesn't match stops it.
+- The files must be readable by the `graphrelay` user and nobody else who shouldn't have the key:
+  `install -d -o root -g graphrelay -m 0750 /etc/graphrelay/tls`, files `root:graphrelay`, mode `0640`.
+  That user is created by the installer, so put the files in place after step 6b and before starting the
+  relay (6d).
+- To renew, replace the files (write the new ones next to them and `mv` them into place). The relay picks
+  them up within about a minute, without a restart, and logs "TLS certificate reloaded".
+- Devices need your CA's root certificate in their trust store; distribute it from your CA. The portal's
+  certificate download card is not shown in this mode.
 
 ## 6. Install, configure, start
 
@@ -202,9 +247,10 @@ Edit `config.yaml`:
 |---|---|
 | `hostname` | `relay.example.com` |
 | `data_dir` | `/opt/graphrelay/data` |
-| `tls.acme_email` | an address for Let's Encrypt expiry notices |
-| `tls.skip_dns_propagation_check` | `true` only if your network redirects all outbound DNS to an internal resolver (see section 11) |
-| `tls.rsa_fallback` | `true` (default): also keep an RSA certificate for devices that can't use ECDSA |
+| `tls.mode` | `acme` (automatic, needs Cloudflare) or `files` (your own certificate), see section 5 |
+| `tls.acme_email` | `acme` mode: an address for Let's Encrypt expiry notices |
+| `tls.skip_dns_propagation_check` | `acme` mode: `true` only if your network redirects all outbound DNS to an internal resolver (see section 11) |
+| `tls.rsa_fallback` | `acme` mode: `true` (default) also keeps an RSA certificate for devices that can't use ECDSA |
 | `smtp.max_message_bytes` | up to `157286400` (150 MB) |
 | `portal.allowed_cidrs` | networks allowed to open the portal |
 | `portal.microsoft_login.enabled` | `true`, `required_roles: ["Relay.Admin"]` |
@@ -214,28 +260,6 @@ Edit `config.yaml`:
 
 Keep secrets out of the file: `graph.*` and `tls.cloudflare_api_token` already reference `${...}` variables.
 `config.yaml` is ignored by git.
-
-**Your own certificate instead of Let's Encrypt.** If you have a private CA or certificates from another
-source, skip step 5 and use the `files` mode:
-
-```yaml
-tls:
-  mode: files
-  cert_file: /etc/graphrelay/tls/fullchain.pem   # server certificate first, then the intermediates
-  key_file: /etc/graphrelay/tls/privkey.pem
-  # optional, for devices that can't use the first certificate (e.g. RSA next to ECDSA):
-  # fallback_cert_file: /etc/graphrelay/tls/fullchain-rsa.pem
-  # fallback_key_file: /etc/graphrelay/tls/privkey-rsa.pem
-```
-
-- The certificate must list the relay's name (`hostname`) as a DNS name; the relay warns at startup if it
-  doesn't, or if the certificate is expired or about to expire. A key that doesn't match stops it.
-- The files must be readable by the `graphrelay` user and nobody else who shouldn't have the key:
-  `install -d -o root -g graphrelay -m 0750 /etc/graphrelay/tls`, files `root:graphrelay`, mode `0640`.
-- To renew, replace the files (write the new ones next to them and `mv` them into place). The relay picks
-  them up within about a minute, without a restart, and logs "TLS certificate reloaded".
-- Devices need your CA's root certificate in their trust store; distribute it from your CA. The portal's
-  certificate download card is not shown in this mode.
 
 ### 6b. Deploy
 
@@ -258,7 +282,7 @@ nano /etc/graphrelay.env       # root:root, mode 0600
 ```
 
 ```
-CLOUDFLARE_API_TOKEN=...
+CLOUDFLARE_API_TOKEN=...          # only with tls.mode: acme
 GRAPH_TENANT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 GRAPH_CLIENT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 GRAPH_CLIENT_SECRET=...
@@ -276,7 +300,7 @@ journalctl -u graphrelay -f
 | Log line | Meaning |
 |---|---|
 | `created portal admin account ... password=...` | Local break-glass password, printed once (needed only if section 9 is ever used) |
-| `certificate obtained successfully` | Cloudflare token and DNS-01 work (first start takes 1–2 minutes) |
+| `certificate obtained successfully` | `acme` mode: Cloudflare token and DNS-01 work (first start takes 1–2 minutes) |
 | `SMTP listening` ×3, `management portal listening` | Relay is up |
 | `Microsoft Graph authentication OK` | Tenant ID, client ID and secret are correct |
 | `firewall allowlist updated ... entries=0` | No host rules yet, so the SMTP ports are still closed |
@@ -352,8 +376,9 @@ systemctl restart graphrelay
 | What | When | How |
 |---|---|---|
 | Client secret | Before it expires | New secret (step 2.4), update `/etc/graphrelay.env`, `systemctl restart graphrelay`, delete the old secret |
-| Cloudflare token | If it has an expiry | New token (step 5), update the env file, restart |
-| TLS certificate | Automatic | Renewed about 30 days before expiry |
+| Cloudflare token (`acme` mode) | If it has an expiry | New token (step 5a), update the env file, restart |
+| Own certificate (`files` mode) | Before it expires | Replace the certificate and key files (step 5b); no restart needed |
+| TLS certificate (`acme` mode) | Automatic | Renewed about 30 days before expiry |
 | OS updates | Automatic | `unattended-upgrades` (set up by `harden-host.sh`) |
 | Relay upgrade | When needed | `CONFIG=config.yaml deploy/push.sh root@relay.example.com`; config, env file and database are kept |
 | Backup | Regularly | `/opt/graphrelay/data/` (database, certificates) and `/etc/graphrelay.env` restore everything |

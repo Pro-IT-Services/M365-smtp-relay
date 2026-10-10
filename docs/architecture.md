@@ -28,7 +28,7 @@ allowlist exporter. All state lives in one SQLite file and a certificate directo
 | `internal/config` | YAML configuration, `${ENV}` expansion, defaults, validation |
 | `internal/relay` | SMTP sessions, host matching, SMTP AUTH, MIME rewriting |
 | `internal/graph` | Microsoft Graph client: OAuth token cache, small and large send paths |
-| `internal/tlsmgr` | Certificates: Let's Encrypt via Cloudflare DNS-01, or self-signed |
+| `internal/tlsmgr` | Certificates: Let's Encrypt via Cloudflare DNS-01, the operator's own files, or self-signed |
 | `internal/portal` | HTTPS management UI, Microsoft sign-in (OIDC), CSRF, sessions |
 | `internal/store` | SQLite persistence: hosts, settings, message log, migrations |
 | `internal/firewall` | Writes the enabled host rules as an IP allowlist file |
@@ -60,7 +60,8 @@ allowlist exporter. All state lives in one SQLite file and a certificate directo
 (`os.ExpandEnv`), unmarshals over built-in defaults, and validates:
 
 - `hostname` is required.
-- `tls.mode` is `acme` (needs `cloudflare_api_token` and `acme_email`) or `selfsigned`.
+- `tls.mode` is `acme` (needs `cloudflare_api_token` and `acme_email`), `files` (needs `cert_file` and
+  `key_file`; a fallback pair must be complete) or `selfsigned`.
 - `graph.tenant_id`, `client_id` and `client_secret` are required; the tenant must be a GUID when Microsoft
   sign-in is enabled.
 - `smtp.max_message_bytes` may not exceed 150 MB (the Graph limit).
@@ -181,7 +182,7 @@ disk, so a crash cannot lose accepted mail. Devices retry `451` by themselves.
 
 ## TLS certificates (`internal/tlsmgr`)
 
-- **`acme` mode:** `certmagic` obtains a Let's Encrypt certificate (production or staging CA) for `hostname`
+- **`acme` mode** (requires the domain's DNS zone to be hosted at Cloudflare)**:** `certmagic` obtains a Let's Encrypt certificate (production or staging CA) for `hostname`
   plus `extra_domains` using the **DNS-01** challenge through the Cloudflare API (`libdns/cloudflare`). No
   inbound port 80/443 is needed. Certificates, keys and the ACME account are stored under
   `data_dir/certs` and renewed automatically in the background. `DefaultServerName` is set because many SMTP

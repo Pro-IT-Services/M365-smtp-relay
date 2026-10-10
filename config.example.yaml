@@ -22,8 +22,10 @@ smtp:
   write_timeout: 2m
 
 tls:
-  # "acme"       = Let's Encrypt via Cloudflare DNS-01, renewed automatically.
+  # "acme"       = Let's Encrypt, obtained and renewed automatically. REQUIRES the DNS zone of your
+  #                domain to be hosted at Cloudflare (DNS-01 challenge via the Cloudflare API).
   # "files"      = your own certificate and key (own CA or any other source), see below.
+  #                No Cloudflare needed.
   # "selfsigned" = throwaway certificate for local testing.
   mode: acme
   acme_email: admin@example.com

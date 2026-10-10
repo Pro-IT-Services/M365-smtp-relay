@@ -11,20 +11,29 @@ is disabled or unwanted.
 - **Allowed sender mailboxes**: an admin-managed list of the only mailboxes rules may send as.
 - **Messages up to 150 MB**: small ones as raw MIME, large ones as a Graph draft with upload sessions.
 - **Synchronous delivery, no queue**: the client gets `250` only after Graph accepted the message.
-- **TLS certificates** from Let's Encrypt via the Cloudflare DNS-01 challenge, renewed automatically, or your
-  own certificate and key from files (private CA or any other source), reloaded when they change. An RSA
-  certificate is kept next to the ECDSA one for older devices.
+- **TLS certificates**, two ways: automatic from Let's Encrypt, renewed by the relay, which **requires your
+  domain's DNS zone to be hosted at Cloudflare** (DNS-01 challenge through the Cloudflare API); or **your own
+  certificate and key** from files (private CA or any other source), reloaded when they change, with no
+  Cloudflare needed. An RSA certificate can be served next to the ECDSA one for older devices.
 - **HTTPS management portal**: hosts, allowed mailboxes, message log, test send, settings; sign-in with
   Microsoft (Entra ID app role) and an optional break-glass local account.
 - **Firewall integration** (optional, Linux/nftables): the SMTP ports open only for the hosts in the portal.
 - A single static binary (no CGO); SQLite storage is embedded.
+
+## Requirements
+
+- A Microsoft 365 tenant with Exchange Online, and rights to register an app and scope its mail permissions.
+- A Linux server (the deploy scripts target Debian with systemd; nftables for the optional firewall integration).
+- For the TLS certificate, one of:
+  - the DNS zone of your domain hosted at **Cloudflare** (automatic Let's Encrypt certificate), or
+  - your **own certificate and key** for the relay's name.
 
 ## Documentation
 
 | Document | Content |
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | How the code works: packages, message flow, security model, data stored |
-| [docs/setup.md](docs/setup.md) | Step-by-step setup: Entra ID, Exchange Online, Cloudflare, server, first start, operation |
+| [docs/setup.md](docs/setup.md) | Step-by-step setup: Entra ID, Exchange Online, TLS certificate (Cloudflare or your own), server, first start, operation |
 | [config.example.yaml](config.example.yaml) | Every configuration option with comments |
 
 ## Quick start (local test, no Microsoft or Cloudflare account)
