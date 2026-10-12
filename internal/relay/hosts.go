@@ -51,8 +51,19 @@ func (m *Matcher) Match(ctx context.Context, ip netip.Addr) (*store.Host, error)
 	return best, nil
 }
 
-// score returns -1 for no match, otherwise a specificity value.
+// score returns -1 for no match, otherwise a specificity value. For a rule
+// with several entries it is the best score of any entry.
 func (m *Matcher) score(ctx context.Context, match string, ip netip.Addr) int {
+	best := -1
+	for _, entry := range store.SplitMatch(match) {
+		if s := m.scoreOne(ctx, entry, ip); s > best {
+			best = s
+		}
+	}
+	return best
+}
+
+func (m *Matcher) scoreOne(ctx context.Context, match string, ip netip.Addr) int {
 	if a, err := netip.ParseAddr(match); err == nil {
 		if a.Unmap() == ip {
 			return 1000
@@ -108,9 +119,33 @@ func (m *Matcher) resolve(ctx context.Context, name string) []netip.Addr {
 	return addrs
 }
 
+// MaxMatchEntries limits how many addresses one host rule may list.
+const MaxMatchEntries = 256
+
 // ValidateMatch checks the syntax of a host match value and normalises it.
+// The value is one entry or a list separated by commas, semicolons or
+// whitespace; duplicates are dropped and the result is joined with ", ".
 func ValidateMatch(s string) (string, bool) {
-	s = strings.TrimSpace(s)
+	entries := store.SplitMatch(s)
+	if len(entries) == 0 || len(entries) > MaxMatchEntries {
+		return "", false
+	}
+	out := make([]string, 0, len(entries))
+	seen := map[string]bool{}
+	for _, e := range entries {
+		norm, ok := validateEntry(e)
+		if !ok {
+			return "", false
+		}
+		if !seen[norm] {
+			seen[norm] = true
+			out = append(out, norm)
+		}
+	}
+	return strings.Join(out, ", "), true
+}
+
+func validateEntry(s string) (string, bool) {
 	if a, err := netip.ParseAddr(s); err == nil {
 		return a.Unmap().String(), true
 	}

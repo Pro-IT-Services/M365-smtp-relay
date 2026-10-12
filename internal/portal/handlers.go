@@ -141,7 +141,7 @@ func (p *Portal) hostSave(w http.ResponseWriter, r *http.Request) {
 	}
 	norm, ok := relay.ValidateMatch(h.Match)
 	if !ok {
-		fail("Address must be an IP address (10.0.0.5), a network in CIDR notation (10.0.0.0/24) or a DNS hostname.")
+		fail("Address must be an IP address (10.0.0.5), a network in CIDR notation (10.0.0.0/24) or a DNS hostname, or a list of up to 256 of those separated by commas.")
 		return
 	}
 	h.Match = norm

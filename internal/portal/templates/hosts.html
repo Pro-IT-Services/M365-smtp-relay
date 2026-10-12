@@ -16,7 +16,7 @@
     {{range .Hosts}}
     <tr class="{{if not .Enabled}}dim{{end}}">
       <td><strong>{{.Name}}</strong>{{if .Note}}<br><span class="muted small">{{.Note}}</span>{{end}}</td>
-      <td class="mono">{{.Match}}{{if .SMTPUser}} <span class="pill" title="Must also log in as {{.SMTPUser}}">login</span>{{end}}</td>
+      <td class="mono detail">{{.Match}}{{if .SMTPUser}} <span class="pill" title="Must also log in as {{.SMTPUser}}">login</span>{{end}}</td>
       <td>{{.Sender}}{{if not (index $allowed .Sender)}} <span class="pill warn" title="Not in Settings → Allowed sender mailboxes. Mail from this host is rejected.">not allowed</span>{{end}}</td>
       <td>{{if .RewriteFrom}}<span class="pill">rewritten</span>{{else}}<span class="pill warn">kept</span>{{end}}</td>
       <td>

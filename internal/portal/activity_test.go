@@ -112,10 +112,10 @@ func TestActivity(t *testing.T) {
 		t.Fatalf("activity page = %d", code)
 	}
 	// "Add a host" next to an address opens the form with that address filled in; junk is ignored.
-	if _, form := e.get(t, "/hosts/new?match=198.51.100.77"); !strings.Contains(form, `name="match" value="198.51.100.77"`) {
+	if _, form := e.get(t, "/hosts/new?match=198.51.100.77"); !strings.Contains(form, `scanner.corp.local">198.51.100.77</textarea>`) {
 		t.Error("host form not prefilled from ?match=")
 	}
-	if _, form := e.get(t, "/hosts/new?match="+url.QueryEscape(`"><script>`)); !strings.Contains(form, `name="match" value=""`) {
+	if _, form := e.get(t, "/hosts/new?match="+url.QueryEscape(`"><script>`)); !strings.Contains(form, `scanner.corp.local"></textarea>`) {
 		t.Error("invalid ?match= was not ignored")
 	}
 	if _, js := e.get(t, "/static/activity.js"); !strings.Contains(js, `"/hosts/new?match=" + encodeURIComponent(ip)`) {

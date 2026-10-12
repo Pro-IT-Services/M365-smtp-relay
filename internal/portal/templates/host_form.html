@@ -9,8 +9,8 @@
   </label>
 
   <label>Address / network
-    <input name="match" value="{{.Host.Match}}" required class="mono" placeholder="10.0.0.25  or  10.0.0.0/24  or  scanner.corp.local">
-    <span class="hint">A single IP (IPv4 or IPv6), a network in CIDR notation, or a DNS hostname (resolved when the client connects, cached 2 minutes).</span>
+    <textarea name="match" required class="mono" rows="2" maxlength="8000" placeholder="10.0.0.25  or  10.0.0.0/24  or  scanner.corp.local">{{.Host.Match}}</textarea>
+    <span class="hint">An IP (IPv4 or IPv6), a network in CIDR notation, or a DNS hostname (resolved when the client connects, cached 2 minutes). For a service that sends from several addresses, enter a list separated by commas, spaces or new lines (up to 256 entries).</span>
   </label>
 
   <label>Sends as mailbox

@@ -13,7 +13,8 @@ import (
 )
 
 // Host is an allowed client. Match is an IP address, a CIDR, or a DNS name
-// that is resolved when clients connect.
+// that is resolved when clients connect, or a comma-separated list of those
+// (a service that sends from several addresses).
 type Host struct {
 	ID     int64
 	Name   string
@@ -27,6 +28,17 @@ type Host struct {
 	Enabled      bool
 	Note         string
 	CreatedAt    time.Time
+}
+
+// Matches returns the individual entries of Match.
+func (h *Host) Matches() []string { return SplitMatch(h.Match) }
+
+// SplitMatch splits a host match value into its entries. Commas, semicolons
+// and any whitespace separate entries.
+func SplitMatch(s string) []string {
+	return strings.FieldsFunc(s, func(r rune) bool {
+		return r == ',' || r == ';' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
+	})
 }
 
 type LogEntry struct {

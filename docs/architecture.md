@@ -93,6 +93,11 @@ The highest score wins, so a specific rule overrides a broader network rule. IPv
 unmapped before comparison. If DNS fails, the last good answer is reused. `ValidateMatch` normalises input
 from the portal (lower-case names, masked prefixes).
 
+A rule's `match` may also be a **list** of such entries (up to 256), for a service that sends from several
+addresses. It is stored in the same column, normalised to a comma-separated string without duplicates
+(`store.SplitMatch` splits it again). The rule's score for a client is the best score of any entry, and the
+firewall exporter writes every entry to the allowlist.
+
 ### Session checks, in order
 
 1. **TLS on submission:** on 587 with `require_tls_on_submission`, `MAIL FROM` before STARTTLS → `530`.

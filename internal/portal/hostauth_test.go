@@ -11,6 +11,40 @@ import (
 	"graphrelay/internal/config"
 )
 
+func TestHostAddressList(t *testing.T) {
+	e := newPortalEnv(t, config.MicrosoftLoginConfig{RequiredRoles: []string{"Relay.Admin"}})
+	resp, _ := e.signIn(t, map[string]any{"roles": []string{"Relay.Admin"}})
+	resp.Body.Close()
+	if err := e.store.SetAllowedSenders([]string{"scanner@contoso.com"}); err != nil {
+		t.Fatal(err)
+	}
+	_, form := e.get(t, "/hosts/new")
+	v := url.Values{"name": {"cloud service"}, "sender": {"scanner@contoso.com"}, "enabled": {"on"},
+		"match": {"198.51.100.11, 198.51.100.12,203.0.113.7\r\n203.0.113.9/28 198.51.100.11"}}
+	if code, _ := e.post(t, form, "/hosts/save", v); code != http.StatusSeeOther {
+		t.Fatalf("save = %d", code)
+	}
+	h, err := e.store.GetHost(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "198.51.100.11, 198.51.100.12, 203.0.113.7, 203.0.113.0/28"; h.Match != want {
+		t.Fatalf("stored match = %q, want %q", h.Match, want)
+	}
+	// The list comes back in the edit form and in the hosts table.
+	if _, page := e.get(t, "/hosts/1"); !strings.Contains(page, ">"+h.Match+"</textarea>") {
+		t.Error("list missing from the edit form")
+	}
+	if _, page := e.get(t, "/hosts"); !strings.Contains(page, h.Match) {
+		t.Error("list missing from the hosts table")
+	}
+	// One bad entry rejects the whole value.
+	v.Set("match", "198.51.100.11, not_an_address")
+	if code, page := e.post(t, form, "/hosts/save", v); code != http.StatusUnprocessableEntity || !strings.Contains(page, "separated by commas") {
+		t.Errorf("bad entry: got %d", code)
+	}
+}
+
 func TestHostSMTPLoginFields(t *testing.T) {
 	e := newPortalEnv(t, config.MicrosoftLoginConfig{RequiredRoles: []string{"Relay.Admin"}})
 	resp, _ := e.signIn(t, map[string]any{"roles": []string{"Relay.Admin"}})

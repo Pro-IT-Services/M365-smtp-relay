@@ -2,6 +2,7 @@ package relay
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
@@ -288,6 +289,10 @@ func TestValidateMatch(t *testing.T) {
 		"::ffff:10.0.0.1":    "10.0.0.1",
 		"2001:db8::/32":      "2001:db8::/32",
 		"Scanner.Corp.Local": "scanner.corp.local",
+		// Lists: any mix of separators, normalised, duplicates dropped.
+		"192.0.2.1, 192.0.2.2,192.0.2.3":         "192.0.2.1, 192.0.2.2, 192.0.2.3",
+		"192.0.2.1\n198.51.100.7/24; Host.Test ": "192.0.2.1, 198.51.100.0/24, host.test",
+		"192.0.2.1, 192.0.2.1 ::ffff:192.0.2.1":  "192.0.2.1",
 	}
 	for in, want := range cases {
 		got, ok := ValidateMatch(in)
@@ -295,9 +300,55 @@ func TestValidateMatch(t *testing.T) {
 			t.Errorf("ValidateMatch(%q) = %q, %v; want %q", in, got, ok, want)
 		}
 	}
-	for _, bad := range []string{"", "10.0.0.0/33", "bad host!", "a..b"} {
+	for _, bad := range []string{"", "10.0.0.0/33", "bad host!", "a..b", " , ", "192.0.2.1, 10.0.0.0/33"} {
 		if _, ok := ValidateMatch(bad); ok {
 			t.Errorf("ValidateMatch(%q) accepted", bad)
+		}
+	}
+	if _, ok := ValidateMatch(strings.Repeat("192.0.2.1/32 ", MaxMatchEntries)); !ok {
+		t.Error("duplicates within the entry limit rejected")
+	}
+	var many []string
+	for i := 0; i <= MaxMatchEntries; i++ {
+		many = append(many, fmt.Sprintf("10.1.%d.%d", i/256, i%256))
+	}
+	if _, ok := ValidateMatch(strings.Join(many, ",")); ok {
+		t.Error("more entries than the limit accepted")
+	}
+}
+
+func TestMatchList(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	save := func(name, match string) {
+		t.Helper()
+		if err := st.SaveHost(&store.Host{Name: name, Match: match, Sender: "a@contoso.com", Enabled: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	save("cloud", "198.51.100.11, 198.51.100.12, 203.0.113.0/28")
+	save("whole-net", "198.51.100.0/24")
+	m := NewMatcher(st)
+	for ip, want := range map[string]string{
+		"198.51.100.11": "cloud",     // exact entry in the list beats the network rule
+		"198.51.100.12": "cloud",     // second entry
+		"203.0.113.9":   "cloud",     // network inside the list
+		"198.51.100.13": "whole-net", // not in the list
+		"192.0.2.1":     "",
+	} {
+		h, err := m.Match(context.Background(), netip.MustParseAddr(ip))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := ""
+		if h != nil {
+			got = h.Name
+		}
+		if got != want {
+			t.Errorf("%s matched %q, want %q", ip, got, want)
 		}
 	}
 }

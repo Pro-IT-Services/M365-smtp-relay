@@ -75,21 +75,23 @@ func (e *Exporter) Prefixes(ctx context.Context) ([]netip.Prefix, error) {
 		if !h.Enabled {
 			continue
 		}
-		if a, err := netip.ParseAddr(h.Match); err == nil {
-			a = a.Unmap()
-			add(netip.PrefixFrom(a, a.BitLen()))
-			continue
-		}
-		if p, err := netip.ParsePrefix(h.Match); err == nil {
-			if p.Addr().Is4In6() {
-				p = netip.PrefixFrom(p.Addr().Unmap(), max(p.Bits()-96, 0))
+		for _, m := range h.Matches() {
+			if a, err := netip.ParseAddr(m); err == nil {
+				a = a.Unmap()
+				add(netip.PrefixFrom(a, a.BitLen()))
+				continue
 			}
-			add(p)
-			continue
-		}
-		for _, a := range e.Resolve(ctx, h.Match) {
-			a = a.Unmap()
-			add(netip.PrefixFrom(a, a.BitLen()))
+			if p, err := netip.ParsePrefix(m); err == nil {
+				if p.Addr().Is4In6() {
+					p = netip.PrefixFrom(p.Addr().Unmap(), max(p.Bits()-96, 0))
+				}
+				add(p)
+				continue
+			}
+			for _, a := range e.Resolve(ctx, m) {
+				a = a.Unmap()
+				add(netip.PrefixFrom(a, a.BitLen()))
+			}
 		}
 	}
 	out := make([]netip.Prefix, 0, len(seen))

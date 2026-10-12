@@ -416,7 +416,9 @@ Differences from a direct install:
    rule whose mailbox is not on the list.
 3. **Hosts → Add host:**
    - **Name:** e.g. `backup-server`
-   - **Address / network:** an IP (`10.0.0.50`), a CIDR (`10.0.1.0/24`) or a DNS name
+   - **Address / network:** an IP (`10.0.0.50`), a CIDR (`10.0.1.0/24`) or a DNS name. For a service that
+     sends from several addresses (a cloud application with a published list of outbound IPs), paste the
+     whole list, separated by commas, spaces or new lines (up to 256 entries)
    - **Sends as mailbox:** choose from the list
    - **Rewrite the From header:** on (unless the mailbox has *Send As* rights for the device's own From address)
    - **Enabled:** on → **Save**
