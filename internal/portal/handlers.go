@@ -93,7 +93,25 @@ func (p *Portal) hostsList(w http.ResponseWriter, r *http.Request) {
 type hostFormData struct {
 	Host    store.Host
 	Senders []string // allowed mailboxes for the dropdown
+	Rows    []loginRow
 	Error   string
+}
+
+// loginRow is one SMTP login line of the host form. Passwords are never sent back to the page.
+type loginRow struct {
+	ID          int64
+	Username    string
+	Sender      string // "" = the host's mailbox
+	HasPassword bool
+}
+
+func newHostFormData(p *Portal, h store.Host, msg string) hostFormData {
+	d := hostFormData{Host: h, Senders: p.senders(), Error: msg}
+	for _, l := range h.Logins {
+		d.Rows = append(d.Rows, loginRow{ID: l.ID, Username: l.Username, Sender: l.Sender, HasPassword: l.PassHash != ""})
+	}
+	d.Rows = append(d.Rows, loginRow{}) // an empty line for a new login
+	return d
 }
 
 func (p *Portal) hostForm(w http.ResponseWriter, r *http.Request) {
@@ -112,7 +130,7 @@ func (p *Portal) hostForm(w http.ResponseWriter, r *http.Request) {
 	} else if m, ok := relay.ValidateMatch(r.URL.Query().Get("match")); ok {
 		h.Match = m // prefilled from the Activity page ("Add a host" next to an address)
 	}
-	p.render(w, r, "host_form", title, hostFormData{Host: h, Senders: p.senders()})
+	p.render(w, r, "host_form", title, newHostFormData(p, h, ""))
 }
 
 func (p *Portal) hostSave(w http.ResponseWriter, r *http.Request) {
@@ -125,7 +143,6 @@ func (p *Portal) hostSave(w http.ResponseWriter, r *http.Request) {
 		RewriteFrom: r.PostFormValue("rewrite_from") == "on",
 		Enabled:     r.PostFormValue("enabled") == "on",
 		Note:        strings.TrimSpace(r.PostFormValue("note")),
-		SMTPUser:    strings.TrimSpace(r.PostFormValue("smtp_user")), // redisplayed if the form fails
 	}
 	fail := func(msg string) {
 		title := "Add host"
@@ -133,7 +150,7 @@ func (p *Portal) hostSave(w http.ResponseWriter, r *http.Request) {
 			title = "Edit host"
 		}
 		w.WriteHeader(http.StatusUnprocessableEntity)
-		p.render(w, r, "host_form", title, hostFormData{Host: h, Senders: p.senders(), Error: msg})
+		p.render(w, r, "host_form", title, newHostFormData(p, h, msg))
 	}
 	if h.Name == "" {
 		fail("Name is required.")
@@ -150,7 +167,7 @@ func (p *Portal) hostSave(w http.ResponseWriter, r *http.Request) {
 		fail("Choose a sender mailbox from the list. Add new mailboxes under Settings → Allowed sender mailboxes.")
 		return
 	}
-	if msg := p.applySMTPAuth(r, &h); msg != "" {
+	if msg := p.applyLogins(r, &h); msg != "" {
 		fail(msg)
 		return
 	}
@@ -160,7 +177,7 @@ func (p *Portal) hostSave(w http.ResponseWriter, r *http.Request) {
 	}
 	p.hostsChanged()
 	p.Log.Info("host saved", "id", h.ID, "name", h.Name, "match", h.Match, "sender", h.Sender,
-		"smtp_login", h.SMTPUser != "")
+		"smtp_logins", len(h.Logins))
 	p.redirect(w, r, "/hosts", fmt.Sprintf("Saved %q.", h.Name), true)
 }
 
@@ -168,43 +185,77 @@ var smtpUserRe = regexp.MustCompile(`^[A-Za-z0-9._@+-]{1,64}$`)
 
 const minSMTPPasswordLen = 12
 
-// applySMTPAuth sets the host's optional SMTP login from the form. An empty password keeps
-// the stored one; "smtp_remove" or an empty username turns the login off. Returns an error
-// message for the form, or "".
-func (p *Portal) applySMTPAuth(r *http.Request, h *store.Host) string {
-	user := strings.TrimSpace(r.PostFormValue("smtp_user"))
-	pass := r.PostFormValue("smtp_password")
-	var old store.Host
+// applyLogins sets the host's SMTP logins from the form's login lines (login_id, login_user,
+// login_pass, login_sender, plus login_remove with the IDs to delete). An empty password keeps a
+// login's stored one; empty new lines are ignored. On error the lines are still put into h.Logins
+// (without new passwords) so the form can show them again. Returns an error message, or "".
+func (p *Portal) applyLogins(r *http.Request, h *store.Host) string {
+	ids, users, passes, senders := r.PostForm["login_id"], r.PostForm["login_user"], r.PostForm["login_pass"], r.PostForm["login_sender"]
+	if len(users) != len(ids) || len(passes) != len(ids) || len(senders) != len(ids) {
+		return "The SMTP login lines were incomplete; reload the page and try again."
+	}
+	remove := map[int64]bool{}
+	for _, v := range r.PostForm["login_remove"] {
+		id, _ := strconv.ParseInt(v, 10, 64)
+		remove[id] = true
+	}
+	stored := map[int64]store.Login{}
 	if h.ID != 0 {
-		old, _ = p.Store.GetHost(h.ID)
-	}
-	if r.PostFormValue("smtp_remove") == "on" || (user == "" && pass == "") {
-		h.SMTPUser, h.SMTPPassHash = "", ""
-		return ""
-	}
-	if user == "" {
-		return "Enter an SMTP username, or leave both login fields empty."
-	}
-	if !smtpUserRe.MatchString(user) {
-		return "SMTP username may contain letters, digits and . _ @ + - (up to 64 characters)."
-	}
-	h.SMTPUser = user
-	switch {
-	case pass != "":
-		if len(pass) < minSMTPPasswordLen {
-			return fmt.Sprintf("SMTP password must be at least %d characters.", minSMTPPasswordLen)
+		old, _ := p.Store.GetHost(h.ID)
+		for _, l := range old.Logins {
+			stored[l.ID] = l
 		}
-		hash, err := relay.HashSMTPPassword(pass)
-		if err != nil {
-			return err.Error()
-		}
-		h.SMTPPassHash = hash
-	case old.SMTPPassHash != "":
-		h.SMTPPassHash = old.SMTPPassHash // keep the current password
-	default:
-		return "Set an SMTP password for this username."
 	}
-	return ""
+
+	h.Logins = nil
+	msg := ""
+	seen := map[string]bool{}
+	for i := range ids {
+		id, _ := strconv.ParseInt(ids[i], 10, 64)
+		user, pass := strings.TrimSpace(users[i]), passes[i]
+		sender := strings.ToLower(strings.TrimSpace(senders[i]))
+		if remove[id] || (id == 0 && user == "" && pass == "") {
+			continue
+		}
+		l := store.Login{ID: id, Username: user, Sender: sender}
+		prev, known := stored[id]
+		if id != 0 {
+			if !known {
+				return "A login in the form no longer exists; reload the page and try again."
+			}
+			l.PassHash = prev.PassHash // kept unless a new password is entered
+		}
+		h.Logins = append(h.Logins, l)
+		if msg != "" {
+			continue // keep collecting lines for the redisplayed form
+		}
+		switch {
+		case !smtpUserRe.MatchString(user):
+			msg = "SMTP username may contain letters, digits and . _ @ + - (up to 64 characters)."
+		case seen[strings.ToLower(user)]:
+			msg = fmt.Sprintf("The username %q is used twice for this host.", user)
+		case pass == "" && id == 0:
+			msg = fmt.Sprintf("Set a password for the new login %q.", user)
+		case pass != "" && len(pass) < minSMTPPasswordLen:
+			msg = fmt.Sprintf("SMTP passwords must be at least %d characters.", minSMTPPasswordLen)
+		case sender != "" && !p.senderAllowed(sender):
+			msg = "Choose the login's mailbox from the list, or leave it on the host's mailbox."
+		}
+		seen[strings.ToLower(user)] = true
+		if msg == "" && pass != "" {
+			hash, err := relay.HashSMTPPassword(pass)
+			if err != nil {
+				return err.Error()
+			}
+			h.Logins[len(h.Logins)-1].PassHash = hash
+		}
+	}
+	return msg
+}
+
+func (p *Portal) senderAllowed(mailbox string) bool {
+	ok, _ := p.Store.SenderAllowed(mailbox)
+	return ok
 }
 
 func (p *Portal) hostDelete(w http.ResponseWriter, r *http.Request) {

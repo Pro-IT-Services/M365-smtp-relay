@@ -1,10 +1,13 @@
--- schema version 1
+-- schema version 2
 
 -- index conn_log_ip
 CREATE INDEX conn_log_ip ON conn_log(client_ip, ts);
 
 -- index conn_log_ts
 CREATE INDEX conn_log_ts ON conn_log(ts);
+
+-- index host_logins_username
+CREATE INDEX host_logins_username ON host_logins(username);
 
 -- index message_log_ts
 CREATE INDEX message_log_ts ON message_log(ts);
@@ -30,6 +33,17 @@ CREATE TABLE conn_log (
 	duration_ms INTEGER NOT NULL DEFAULT 0
 );
 
+-- table host_logins
+CREATE TABLE host_logins (
+	id         INTEGER PRIMARY KEY AUTOINCREMENT,
+	host_id    INTEGER NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+	username   TEXT NOT NULL,
+	pass_hash  TEXT NOT NULL,
+	sender     TEXT NOT NULL DEFAULT '',
+	created_at INTEGER NOT NULL,
+	UNIQUE (host_id, username)
+);
+
 -- table hosts
 CREATE TABLE hosts (
 	id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -40,7 +54,7 @@ CREATE TABLE hosts (
 	enabled      INTEGER NOT NULL DEFAULT 1,
 	note         TEXT NOT NULL DEFAULT '',
 	created_at   INTEGER NOT NULL
-, smtp_user TEXT NOT NULL DEFAULT '', smtp_pass_hash TEXT NOT NULL DEFAULT '');
+);
 
 -- table message_log
 CREATE TABLE message_log (

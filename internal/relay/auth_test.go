@@ -30,11 +30,11 @@ func setupAuth(t *testing.T) *env {
 		t.Fatal(err)
 	}
 	h := &store.Host{Name: "printer", Match: "127.0.0.1", Sender: "relay@contoso.com", RewriteFrom: true,
-		Enabled: true, SMTPUser: "printer01", SMTPPassHash: hash}
+		Enabled: true, Logins: []store.Login{{Username: "printer01", PassHash: hash}}}
 	if err := e.store.SaveHost(h); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.store.SetAllowedSenders([]string{"relay@contoso.com"}); err != nil {
+	if err := e.store.SetAllowedSenders([]string{"relay@contoso.com", "payroll@contoso.com", "planning@contoso.com"}); err != nil {
 		t.Fatal(err)
 	}
 	return e
@@ -165,7 +165,7 @@ func TestAuthNotOfferedWithoutTLS(t *testing.T) {
 func TestNoAuthHostUnchanged(t *testing.T) {
 	e := setupAuth(t)
 	h, _ := e.store.GetHost(1)
-	h.SMTPUser, h.SMTPPassHash = "", ""
+	h.Logins = nil
 	if err := e.store.SaveHost(&h); err != nil {
 		t.Fatal(err)
 	}
@@ -180,4 +180,93 @@ func TestNoAuthHostUnchanged(t *testing.T) {
 	if ok, _ := c.Extension("AUTH"); ok {
 		t.Fatal("AUTH offered to a host without credentials")
 	}
+}
+
+func mustHash(t *testing.T, pw string) string {
+	t.Helper()
+	h, err := HashSMTPPassword(pw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+
+// One rule with several logins: each login sends as its own mailbox (or the rule's).
+func TestSeveralLoginsOneHost(t *testing.T) {
+	e := setupAuth(t)
+	h, _ := e.store.GetHost(1)
+	h.Logins = append(h.Logins,
+		store.Login{Username: "payroll", PassHash: mustHash(t, "payroll password 1"), Sender: "payroll@contoso.com"},
+		store.Login{Username: "planning", PassHash: mustHash(t, "planning password 1"), Sender: "planning@contoso.com"})
+	if err := e.store.SaveHost(&h); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ user, pass, mailbox string }{
+		{"payroll", "payroll password 1", "payroll@contoso.com"},
+		{"planning", "planning password 1", "planning@contoso.com"},
+		{"printer01", "correct horse battery", "relay@contoso.com"}, // no own mailbox: the rule's
+	} {
+		e.fake.mimeUser = ""
+		if err := e.send(t, true, loginAuth{tc.user, tc.pass}); err != nil {
+			t.Fatalf("%s: %v", tc.user, err)
+		}
+		if e.fake.mimeUser != tc.mailbox {
+			t.Errorf("%s sent as %q, want %q", tc.user, e.fake.mimeUser, tc.mailbox)
+		}
+	}
+	// Another login's password doesn't work for this username.
+	wantCode(t, e.send(t, true, loginAuth{"payroll", "planning password 1"}), "535")
+	// Still no anonymous sending.
+	wantCode(t, e.send(t, true, nil), "530")
+
+	logs, _ := e.store.ListLog(store.LogFilter{Status: "sent"})
+	if len(logs) != 3 || logs[0].Sender != "relay@contoso.com" || logs[2].Sender != "payroll@contoso.com" {
+		t.Fatalf("log senders: %+v", logs)
+	}
+}
+
+// Two rules for the same address, told apart by the login (the setup that did not work before).
+func TestTwoRulesSameAddressByLogin(t *testing.T) {
+	e := setupAuth(t)
+	other := &store.Host{Name: "planning app", Match: "127.0.0.1/32", Sender: "planning@contoso.com", RewriteFrom: true,
+		Enabled: true, Logins: []store.Login{{Username: "planner", PassHash: mustHash(t, "planner password")}}}
+	if err := e.store.SaveHost(other); err != nil {
+		t.Fatal(err)
+	}
+	// "printer" (exact IP) is the more specific rule, but the login of the /32 rule picks that one.
+	if err := e.send(t, true, loginAuth{"planner", "planner password"}); err != nil {
+		t.Fatal(err)
+	}
+	if e.fake.mimeUser != "planning@contoso.com" {
+		t.Fatalf("sent as %q", e.fake.mimeUser)
+	}
+	if err := e.send(t, true, loginAuth{"printer01", "correct horse battery"}); err != nil {
+		t.Fatal(err)
+	}
+	if e.fake.mimeUser != "relay@contoso.com" {
+		t.Fatalf("sent as %q", e.fake.mimeUser)
+	}
+}
+
+// A login removed in the portal stops working for a connection that logged in with it earlier.
+func TestRemovedLoginNoLongerSends(t *testing.T) {
+	e := setupAuth(t)
+	c, err := smtp.Dial(e.addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.Hello("client.test")
+	if err := c.StartTLS(&tls.Config{InsecureSkipVerify: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Auth(loginAuth{"printer01", "correct horse battery"}); err != nil {
+		t.Fatal(err)
+	}
+	h, _ := e.store.GetHost(1)
+	h.Logins = []store.Login{{Username: "printer02", PassHash: mustHash(t, "another password")}}
+	if err := e.store.SaveHost(&h); err != nil {
+		t.Fatal(err)
+	}
+	wantCode(t, c.Mail("app@client.test"), "530")
 }

@@ -182,6 +182,10 @@ section .flash { margin: 12px 0 0; }
 
 fieldset.group { border: 1px solid var(--border, #3333); border-radius: 8px; padding: 12px 14px; margin: 0; display: grid; gap: 10px; }
 fieldset.group legend { font-weight: 600; padding: 0 6px; }
+.login-row { display: grid; gap: 8px; padding-top: 10px; border-top: 1px solid var(--border, #3333); }
+.login-row:first-of-type { border-top: 0; padding-top: 0; }
+.login-row label.check { align-self: end; padding-bottom: 8px; }
+.login-row .row .row .grow { min-width: 120px; }
 
 /* --- Activity page --- */
 :root { --series-ok: #3b82f6; --series-problem: #d03b3b; }

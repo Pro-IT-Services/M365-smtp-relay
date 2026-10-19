@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -32,23 +33,41 @@ func NewMatcher(s *store.Store) *Matcher {
 }
 
 func (m *Matcher) Match(ctx context.Context, ip netip.Addr) (*store.Host, error) {
+	all, err := m.MatchAll(ctx, ip)
+	if err != nil || len(all) == 0 {
+		return nil, err
+	}
+	return &all[0], nil
+}
+
+// MatchAll returns every enabled host rule that matches ip, most specific first (ties keep the
+// rules' name order). A login is looked up among all of them, so several rules for the same
+// address can be told apart by the login the client uses.
+func (m *Matcher) MatchAll(ctx context.Context, ip netip.Addr) ([]store.Host, error) {
 	hosts, err := m.store.ListHosts()
 	if err != nil {
 		return nil, err
 	}
 	ip = ip.Unmap()
-	var best *store.Host
-	bestScore := -1
-	for i := range hosts {
-		h := &hosts[i]
+	type scored struct {
+		h     store.Host
+		score int
+	}
+	var found []scored
+	for _, h := range hosts {
 		if !h.Enabled {
 			continue
 		}
-		if score := m.score(ctx, h.Match, ip); score > bestScore {
-			best, bestScore = h, score
+		if score := m.score(ctx, h.Match, ip); score >= 0 {
+			found = append(found, scored{h, score})
 		}
 	}
-	return best, nil
+	slices.SortStableFunc(found, func(a, b scored) int { return b.score - a.score })
+	out := make([]store.Host, len(found))
+	for i, f := range found {
+		out[i] = f.h
+	}
+	return out, nil
 }
 
 // score returns -1 for no match, otherwise a specificity value. For a rule

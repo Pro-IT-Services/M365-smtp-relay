@@ -13,7 +13,7 @@
     <span class="hint">An IP (IPv4 or IPv6), a network in CIDR notation, or a DNS hostname (resolved when the client connects, cached 2 minutes). For a service that sends from several addresses, enter a list separated by commas, spaces or new lines (up to 256 entries).</span>
   </label>
 
-  <label>Sends as mailbox
+  <label>Sends as mailbox (default)
     {{$cur := .Host.Sender}}{{$found := false}}{{range .Senders}}{{if eq . $cur}}{{$found = true}}{{end}}{{end}}
     <select name="sender" class="full" required>
       <option value="" {{if not $cur}}selected{{end}} disabled>Choose a mailbox…</option>
@@ -24,30 +24,45 @@
     {{else}}<span class="hint">The Microsoft 365 mailbox used to send through Graph. Messages appear in its Sent Items. The list is managed under <a href="/settings">Settings</a>.</span>{{end}}
   </label>
 
-  <fieldset class="group">
-    <legend>SMTP login (optional)</legend>
-    <p class="hint">Leave empty to allow this host by its address alone. When set, the host must <em>also</em> log in
-    (AUTH PLAIN or LOGIN). Login is only offered over TLS: STARTTLS on port 25/587, or port 465.</p>
-    <label>Username
-      <span class="row">
-        <input name="smtp_user" id="smtp_user" value="{{.Host.SMTPUser}}" maxlength="64" autocomplete="off" class="mono grow" placeholder="e.g. printer01">
-        <button type="button" class="btn ghost small" data-generate-user="smtp_user" title="Suggest a username from the host name. Click again for another one.">Generate</button>
-      </span>
-    </label>
-    <label>Password
-      <span class="row">
-        <input name="smtp_password" id="smtp_password" type="password" minlength="12" autocomplete="new-password" class="mono grow"
-          placeholder="{{if .Host.SMTPPassHash}}•••••••• (leave empty to keep the current password){{else}}at least 12 characters{{end}}">
-        <button type="button" class="btn ghost small" data-generate="smtp_password">Generate</button>
-      </span>
-      <span class="hint">Shown only while you type or generate it. It's stored as a hash and can't be displayed later, so copy it to the device now.</span>
-    </label>
-    {{if .Host.SMTPUser}}
-    <label class="check">
-      <input type="checkbox" name="smtp_remove">
-      <span><strong>Remove SMTP login</strong> (allow this host by address only)</span>
-    </label>
+  {{$senders := .Senders}}
+  <fieldset class="group" id="logins">
+    <legend>SMTP logins (optional)</legend>
+    <p class="hint">Without logins the host is allowed by its address alone. With one or more logins it must <em>also</em>
+    log in with one of them (AUTH PLAIN or LOGIN, offered only over TLS: STARTTLS on port 25/587, or port 465).
+    Each login can send as its own mailbox, so one machine can send as different mailboxes depending on the login.
+    Passwords are shown only while you type or generate them; they are stored as hashes, so copy them to the device now.</p>
+    {{range .Rows}}
+    <div class="login-row">
+      <input type="hidden" name="login_id" value="{{.ID}}">
+      <div class="row">
+        <label class="grow">Username
+          <span class="row">
+            <input name="login_user" value="{{.Username}}" maxlength="64" autocomplete="off" class="mono grow" placeholder="e.g. printer01">
+            <button type="button" class="btn ghost small" data-generate-user="row" title="Suggest a username from the host name. Click again for another one.">Generate</button>
+          </span>
+        </label>
+        <label class="grow">Password
+          <span class="row">
+            <input name="login_pass" type="password" minlength="12" autocomplete="new-password" class="mono grow"
+              placeholder="{{if .HasPassword}}•••••••• (empty = keep){{else}}at least 12 characters{{end}}">
+            <button type="button" class="btn ghost small" data-generate="row">Generate</button>
+          </span>
+        </label>
+      </div>
+      <div class="row">
+        <label class="grow">Sends as
+          {{$cur := .Sender}}{{$found := false}}{{range $senders}}{{if eq . $cur}}{{$found = true}}{{end}}{{end}}
+          <select name="login_sender" class="full">
+            <option value="" {{if not $cur}}selected{{end}}>The host's mailbox</option>
+            {{range $senders}}<option value="{{.}}" {{if eq . $cur}}selected{{end}}>{{.}}</option>{{end}}
+            {{if and $cur (not $found)}}<option value="{{$cur}}" selected>{{$cur}} (no longer allowed, choose another)</option>{{end}}
+          </select>
+        </label>
+        {{if .ID}}<label class="check"><input type="checkbox" name="login_remove" value="{{.ID}}"><span>Remove this login</span></label>{{end}}
+      </div>
+    </div>
     {{end}}
+    <div><button type="button" class="btn ghost small" data-add-login>Add another login</button></div>
   </fieldset>
 
   <label class="check">

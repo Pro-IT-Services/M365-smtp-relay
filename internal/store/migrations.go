@@ -20,6 +20,39 @@ var migrations = []struct {
 	apply func(*Store) error
 }{
 	{"baseline: settings, hosts with SMTP login, message_log, conn_log, allowed senders", (*Store).migrateBaseline},
+	{"host_logins: several SMTP logins per host, each with an optional own mailbox", (*Store).migrateHostLogins},
+}
+
+// migrateHostLogins moves the one SMTP login a host could have (hosts.smtp_user/smtp_pass_hash)
+// into the host_logins table, which allows several per host. All in one transaction, so a crash
+// leaves either the old or the new layout.
+func (s *Store) migrateHostLogins() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, stmt := range []string{
+		`CREATE TABLE IF NOT EXISTS host_logins (
+	id         INTEGER PRIMARY KEY AUTOINCREMENT,
+	host_id    INTEGER NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+	username   TEXT NOT NULL,
+	pass_hash  TEXT NOT NULL,
+	sender     TEXT NOT NULL DEFAULT '',
+	created_at INTEGER NOT NULL,
+	UNIQUE (host_id, username)
+)`,
+		`CREATE INDEX IF NOT EXISTS host_logins_username ON host_logins(username)`,
+		`INSERT INTO host_logins(host_id, username, pass_hash, sender, created_at)
+	SELECT id, smtp_user, smtp_pass_hash, '', created_at FROM hosts WHERE smtp_user != ''`,
+		`ALTER TABLE hosts DROP COLUMN smtp_user`,
+		`ALTER TABLE hosts DROP COLUMN smtp_pass_hash`,
+	} {
+		if _, err := tx.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // SchemaVersion is the schema version this program writes.

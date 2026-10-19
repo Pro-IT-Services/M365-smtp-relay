@@ -101,9 +101,11 @@ firewall exporter writes every entry to the allowlist.
 ### Session checks, in order
 
 1. **TLS on submission:** on 587 with `require_tls_on_submission`, `MAIL FROM` before STARTTLS → `530`.
-2. **Host rule:** no enabled rule matches → `554 5.7.1 Relay access denied` (logged as `rejected`).
-3. **Allowed sender:** the rule's mailbox is not on the allowed sender list → `554 5.7.1` (logged).
-4. **SMTP login:** the rule has a login but the client did not authenticate for this rule → `530 5.7.0
+2. **Host rule:** no enabled rule matches → `554 5.7.1 Relay access denied` (logged as `rejected`). A client
+   that logged in uses the rule and login it logged in with; otherwise the most specific matching rule applies.
+3. **Allowed sender:** the mailbox in use (the login's own, or the rule's) is not on the allowed sender list →
+   `554 5.7.1` (logged).
+4. **SMTP login:** the rule has logins but the client did not log in with one of them → `530 5.7.0
    Authentication required` (logged).
 5. `RCPT TO` addresses are syntax-checked (`553` if invalid); `max_recipients` is enforced by go-smtp.
 6. `DATA` is read into memory (`max_message_bytes` is enforced and advertised as `SIZE`), then delivered.
@@ -130,15 +132,20 @@ of it. So every accepted connection is wrapped:
 
 ### Optional SMTP login (`auth.go`)
 
-A host rule may carry `smtp_user` and a bcrypt `smtp_pass_hash`.
+A host rule may have any number of logins (table `host_logins`: username, bcrypt hash, optional own mailbox).
+A login's mailbox, when set, replaces the rule's, so one machine (one address) can send as different
+mailboxes depending on the login it uses.
 
-- `AuthMechanisms()` is called for EHLO. It returns `PLAIN` and `LOGIN` only if the client's matching rule has
-  a login, so devices behind IP-only rules never see AUTH. go-smtp additionally offers AUTH only on TLS
+- `AuthMechanisms()` is called for EHLO. It returns `PLAIN` and `LOGIN` only if a rule matching the client has
+  logins, so devices behind IP-only rules never see AUTH. go-smtp additionally offers AUTH only on TLS
   connections (`AllowInsecureAuth` is false), so credentials never cross the network in clear text.
 - `PLAIN` uses go-sasl's server. `LOGIN` (the non-standard mechanism many printers use) is implemented in
   `loginServer`, because go-sasl only ships a LOGIN client.
-- `checkLogin` compares the username in constant time and the password with bcrypt, against the rule that
-  matches the client IP. A successful login remembers the rule ID; `MAIL FROM` requires that it matches.
+- `checkLogin` looks for the username among the logins of **every** enabled rule that matches the client IP
+  (`Matcher.MatchAll`, most specific first), comparing usernames in constant time and passwords with bcrypt.
+  An unknown username is checked against a dummy hash, so it takes as long as a wrong password. A successful
+  login remembers the rule and login IDs for the connection; at `MAIL FROM` they are looked up again, so a
+  login or rule removed in the portal stops working at once. Usernames are unique per rule, not globally.
 - `failLimiter` counts failures per client IP: 5 failures within 15 minutes lock the IP out (`454`), even for
   correct credentials. A success resets the counter. Failed logins are written to the message log.
 
@@ -230,7 +237,7 @@ needs no extra files.
 |---|---|
 | Dashboard | Counters for the last 24 h (sent, failed, rejected), recent messages, certificate status |
 | Hosts | List, add, edit, enable/disable, delete rules; "Which rule applies?" checker for an IP |
-| Host form | Name, address, sender mailbox (dropdown from the allowed list), optional SMTP login with a password generator, Rewrite From, enabled, note |
+| Host form | Name, address, default sender mailbox (dropdown from the allowed list), any number of SMTP logins (username and password generators, optional own mailbox, remove), Rewrite From, enabled, note |
 | Activity | Every connection that reached the relay (delivered, idle, failed) and the sources the firewall dropped: tiles, a chart over time, a per-device table and a live, filterable connection list |
 | Log | Message log with status filter, search and paging (100 per page) |
 | Test | Sends a test message straight through Graph from an allowed mailbox |
@@ -262,7 +269,8 @@ SQLite through `modernc.org/sqlite` (pure Go, no CGO), WAL mode, one connection,
 
 | Table | Content |
 |---|---|
-| `hosts` | `name`, `match`, `sender`, `rewrite_from`, `enabled`, `note`, `created_at`, `smtp_user`, `smtp_pass_hash` |
+| `hosts` | `name`, `match`, `sender`, `rewrite_from`, `enabled`, `note`, `created_at` |
+| `host_logins` | `host_id` (deleted with the host), `username` (unique per host), `pass_hash` (bcrypt), `sender` (empty = the host's mailbox), `created_at` |
 | `settings` | Key/value: `allowed_senders` (one address per line), `admin_user`, `admin_password_hash` |
 | `message_log` | Time, client IP, port, host rule, sender mailbox, envelope sender, envelope recipients, subject, size, status, error, duration |
 | `conn_log` | One row per SMTP connection: time, client IP, port, announced name, TLS version and cipher, certificate type served, login name and result, host rule, messages sent/failed/rejected, outcome, reason, duration |
@@ -409,7 +417,7 @@ the workspace. Go, its caches and the dependencies only ever existed inside a co
 - SMTP AUTH: login required, PLAIN and LOGIN, wrong password and lockout, no AUTH without TLS, IP-only rules
   unchanged.
 - Portal against a fake Entra ID (OIDC provider): role checks, foreign tenants, state replay, CSRF-protected
-  forms, the allowed-sender dropdowns, SMTP login fields (validation, hashing, keep-on-edit, removal).
+  forms, the allowed-sender dropdowns, SMTP login lines (validation, hashing, keep-on-edit, removal, per-login mailbox).
 - Connection tracking: delivered, idle, rejected, wrong password, TLS too old, certificate not trusted, RSA
   fallback; certificate selection with real handshakes; the Activity data endpoint; the blocked-source reader.
 - Store migrations from an older schema, configuration from environment variables, the allowlist exporter.

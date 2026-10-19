@@ -1,0 +1,68 @@
+-- schema version 1
+-- (tables first, so the file can be replayed as SQL)
+
+-- table conn_log
+CREATE TABLE conn_log (
+	id          INTEGER PRIMARY KEY AUTOINCREMENT,
+	ts          INTEGER NOT NULL,
+	client_ip   TEXT NOT NULL,
+	port        TEXT NOT NULL,
+	helo        TEXT NOT NULL DEFAULT '',
+	tls         TEXT NOT NULL DEFAULT '',
+	cert_key    TEXT NOT NULL DEFAULT '',
+	auth_user   TEXT NOT NULL DEFAULT '',
+	auth_ok     INTEGER NOT NULL DEFAULT 0,
+	host_id     INTEGER NOT NULL DEFAULT 0,
+	host_name   TEXT NOT NULL DEFAULT '',
+	sent        INTEGER NOT NULL DEFAULT 0,
+	failed      INTEGER NOT NULL DEFAULT 0,
+	rejected    INTEGER NOT NULL DEFAULT 0,
+	outcome     TEXT NOT NULL,
+	detail      TEXT NOT NULL DEFAULT '',
+	duration_ms INTEGER NOT NULL DEFAULT 0
+);
+
+-- table hosts
+CREATE TABLE hosts (
+	id           INTEGER PRIMARY KEY AUTOINCREMENT,
+	name         TEXT NOT NULL,
+	match        TEXT NOT NULL UNIQUE,
+	sender       TEXT NOT NULL,
+	rewrite_from INTEGER NOT NULL DEFAULT 1,
+	enabled      INTEGER NOT NULL DEFAULT 1,
+	note         TEXT NOT NULL DEFAULT '',
+	created_at   INTEGER NOT NULL
+, smtp_user TEXT NOT NULL DEFAULT '', smtp_pass_hash TEXT NOT NULL DEFAULT '');
+
+-- table message_log
+CREATE TABLE message_log (
+	id          INTEGER PRIMARY KEY AUTOINCREMENT,
+	ts          INTEGER NOT NULL,
+	client_ip   TEXT NOT NULL,
+	port        TEXT NOT NULL,
+	host_id     INTEGER NOT NULL DEFAULT 0,
+	host_name   TEXT NOT NULL DEFAULT '',
+	sender      TEXT NOT NULL DEFAULT '',
+	env_from    TEXT NOT NULL DEFAULT '',
+	recipients  TEXT NOT NULL DEFAULT '',
+	subject     TEXT NOT NULL DEFAULT '',
+	size        INTEGER NOT NULL DEFAULT 0,
+	status      TEXT NOT NULL,
+	error       TEXT NOT NULL DEFAULT '',
+	duration_ms INTEGER NOT NULL DEFAULT 0
+);
+
+-- table settings
+CREATE TABLE settings (
+	key   TEXT PRIMARY KEY,
+	value TEXT NOT NULL
+);
+
+-- index conn_log_ip
+CREATE INDEX conn_log_ip ON conn_log(client_ip, ts);
+
+-- index conn_log_ts
+CREATE INDEX conn_log_ts ON conn_log(ts);
+
+-- index message_log_ts
+CREATE INDEX message_log_ts ON message_log(ts);

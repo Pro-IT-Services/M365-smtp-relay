@@ -1,6 +1,7 @@
 package portal
 
 import (
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -45,77 +46,107 @@ func TestHostAddressList(t *testing.T) {
 	}
 }
 
-func TestHostSMTPLoginFields(t *testing.T) {
+func TestHostSMTPLogins(t *testing.T) {
 	e := newPortalEnv(t, config.MicrosoftLoginConfig{RequiredRoles: []string{"Relay.Admin"}})
 	resp, _ := e.signIn(t, map[string]any{"roles": []string{"Relay.Admin"}})
 	resp.Body.Close()
-	if err := e.store.SetAllowedSenders([]string{"scanner@contoso.com"}); err != nil {
+	if err := e.store.SetAllowedSenders([]string{"scanner@contoso.com", "payroll@contoso.com"}); err != nil {
 		t.Fatal(err)
 	}
-	base := func() url.Values {
-		return url.Values{"name": {"printer"}, "match": {"10.0.0.9"}, "sender": {"scanner@contoso.com"}, "enabled": {"on"}}
+	// form builds a host form submission with the given login lines: id, user, password, mailbox.
+	form := func(id string, lines ...[4]string) url.Values {
+		v := url.Values{"id": {id}, "name": {"printer"}, "match": {"10.0.0.9"}, "sender": {"scanner@contoso.com"}, "enabled": {"on"}}
+		for _, l := range lines {
+			v.Add("login_id", l[0])
+			v.Add("login_user", l[1])
+			v.Add("login_pass", l[2])
+			v.Add("login_sender", l[3])
+		}
+		return v
 	}
-	_, form := e.get(t, "/hosts/new")
-	if !strings.Contains(form, `name="smtp_user"`) || !strings.Contains(form, `data-generate="smtp_password"`) ||
-		!strings.Contains(form, `data-generate-user="smtp_user"`) {
-		t.Fatal("login fields missing on host form")
+	_, page := e.get(t, "/hosts/new")
+	for _, want := range []string{`name="login_user"`, `name="login_pass"`, `name="login_sender"`,
+		`data-generate="row"`, `data-generate-user="row"`, `data-add-login`} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("host form lacks %s", want)
+		}
 	}
 
-	for _, tc := range []struct{ user, pass, want string }{
-		{"printer01", "", "Set an SMTP password"},
-		{"printer01", "short", "at least 12 characters"},
-		{"", "a-long-password-1", "Enter an SMTP username"},
-		{"bad user!", "a-long-password-1", "may contain letters"},
+	for _, tc := range []struct {
+		lines [][4]string
+		want  string
+	}{
+		{[][4]string{{"0", "printer01", "", ""}}, "Set a password for the new login"},
+		{[][4]string{{"0", "printer01", "short", ""}}, "at least 12 characters"},
+		{[][4]string{{"0", "bad user!", "a-long-password-1", ""}}, "may contain letters"},
+		{[][4]string{{"0", "a", "a-long-password-1", ""}, {"0", "A", "a-long-password-2", ""}}, "used twice"},
+		{[][4]string{{"0", "printer01", "a-long-password-1", "other@contoso.com"}}, "mailbox from the list"},
+		{[][4]string{{"7", "ghost", "", ""}}, "no longer exists"},
 	} {
-		v := base()
-		v.Set("smtp_user", tc.user)
-		v.Set("smtp_password", tc.pass)
-		code, page := e.post(t, form, "/hosts/save", v)
-		if code != http.StatusUnprocessableEntity || !strings.Contains(page, tc.want) {
-			t.Errorf("user %q pass %q: got %d, want error %q", tc.user, tc.pass, code, tc.want)
+		code, out := e.post(t, page, "/hosts/save", form("0", tc.lines...))
+		if code != http.StatusUnprocessableEntity || !strings.Contains(out, tc.want) {
+			t.Errorf("%v: got %d, want error %q", tc.lines, code, tc.want)
 		}
-		if strings.Contains(page, tc.pass) && tc.pass != "" {
-			t.Errorf("password echoed back in the form")
+		if strings.Contains(out, "a-long-password") {
+			t.Errorf("%v: password echoed back in the form", tc.lines)
 		}
 	}
+	if hosts, _ := e.store.ListHosts(); len(hosts) != 0 {
+		t.Fatalf("a failed form saved a host: %+v", hosts)
+	}
 
-	// Valid login: stored as a bcrypt hash, never in clear.
-	v := base()
-	v.Set("smtp_user", "printer01")
-	v.Set("smtp_password", "a-long-password-1")
-	if code, _ := e.post(t, form, "/hosts/save", v); code != http.StatusSeeOther {
+	// Two logins, one with its own mailbox, plus an empty line (ignored). Stored as bcrypt hashes.
+	code, _ := e.post(t, page, "/hosts/save", form("0",
+		[4]string{"0", "printer01", "a-long-password-1", ""},
+		[4]string{"0", "payroll", "a-long-password-2", "payroll@contoso.com"},
+		[4]string{"0", "", "", ""}))
+	if code != http.StatusSeeOther {
 		t.Fatalf("save = %d", code)
 	}
 	h, err := e.store.GetHost(1)
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || len(h.Logins) != 2 {
+		t.Fatalf("stored: %+v %v", h, err)
 	}
-	if h.SMTPUser != "printer01" || bcrypt.CompareHashAndPassword([]byte(h.SMTPPassHash), []byte("a-long-password-1")) != nil {
-		t.Fatalf("stored login = %q / %q", h.SMTPUser, h.SMTPPassHash)
+	payroll, printer := h.Logins[0], h.Logins[1] // sorted by username
+	if printer.Username != "printer01" || printer.Sender != "" ||
+		bcrypt.CompareHashAndPassword([]byte(printer.PassHash), []byte("a-long-password-1")) != nil ||
+		payroll.Username != "payroll" || payroll.Sender != "payroll@contoso.com" {
+		t.Fatalf("stored logins: %+v", h.Logins)
 	}
-	_, list := e.get(t, "/hosts")
-	if !strings.Contains(list, ">login</span>") {
-		t.Error("hosts list doesn't mark the login")
+	if _, list := e.get(t, "/hosts"); !strings.Contains(list, ">2 logins</span>") {
+		t.Error("hosts list doesn't show the logins")
 	}
 
-	// Editing with an empty password keeps the stored one.
+	// Edit: hashes never appear in the page; an empty password keeps the stored one; a removed
+	// login is deleted; a new one is added.
 	_, edit := e.get(t, "/hosts/1")
-	if strings.Contains(edit, h.SMTPPassHash) {
+	if strings.Contains(edit, printer.PassHash) || strings.Contains(edit, payroll.PassHash) {
 		t.Fatal("password hash rendered in the form")
 	}
-	v = base()
-	v.Set("id", "1")
+	if !strings.Contains(edit, `name="login_remove" value="`) || !strings.Contains(edit, "(empty = keep)") {
+		t.Fatal("edit form lacks remove / keep-password controls for existing logins")
+	}
+	v := form("1",
+		[4]string{fmt.Sprint(printer.ID), "printer01", "", ""},
+		[4]string{fmt.Sprint(payroll.ID), "payroll", "", "payroll@contoso.com"},
+		[4]string{"0", "reports", "a-long-password-3", "payroll@contoso.com"})
 	v.Set("name", "printer renamed")
-	v.Set("smtp_user", "printer01")
-	e.post(t, edit, "/hosts/save", v)
-	if h2, _ := e.store.GetHost(1); h2.SMTPPassHash != h.SMTPPassHash || h2.Name != "printer renamed" {
-		t.Fatalf("password not kept on edit: %+v", h2)
+	v.Add("login_remove", fmt.Sprint(payroll.ID))
+	if code, _ := e.post(t, edit, "/hosts/save", v); code != http.StatusSeeOther {
+		t.Fatalf("edit = %d", code)
+	}
+	h2, _ := e.store.GetHost(1)
+	if h2.Name != "printer renamed" || len(h2.Logins) != 2 || h2.Logins[0].Username != "printer01" ||
+		h2.Logins[0].PassHash != printer.PassHash || h2.Logins[1].Username != "reports" {
+		t.Fatalf("after edit: %+v", h2)
 	}
 
-	// "Remove SMTP login" clears both fields.
-	v.Set("smtp_remove", "on")
+	// Removing every login makes the host address-only again.
+	v = form("1", [4]string{fmt.Sprint(h2.Logins[0].ID), "printer01", "", ""}, [4]string{fmt.Sprint(h2.Logins[1].ID), "reports", "", ""})
+	v.Add("login_remove", fmt.Sprint(h2.Logins[0].ID))
+	v.Add("login_remove", fmt.Sprint(h2.Logins[1].ID))
 	e.post(t, edit, "/hosts/save", v)
-	if h3, _ := e.store.GetHost(1); h3.SMTPUser != "" || h3.SMTPPassHash != "" {
-		t.Fatalf("login not removed: %+v", h3)
+	if h3, _ := e.store.GetHost(1); h3.RequiresLogin() {
+		t.Fatalf("logins not removed: %+v", h3.Logins)
 	}
 }

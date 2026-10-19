@@ -2,8 +2,10 @@ package store
 
 import (
 	"database/sql"
+	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -31,7 +33,7 @@ func TestMigrateAddsSMTPLoginColumns(t *testing.T) {
 			t.Fatalf("open %d: %v", i, err)
 		}
 		h, err := s.GetHost(1)
-		if err != nil || h.Name != "old" || h.SMTPUser != "" || h.SMTPPassHash != "" {
+		if err != nil || h.Name != "old" || h.RequiresLogin() {
 			t.Fatalf("open %d: %+v %v", i, h, err)
 		}
 		s.Close()
@@ -178,5 +180,106 @@ func TestConnLog(t *testing.T) {
 
 	if n, _ := s.PruneConns(since); n != 1 {
 		t.Fatalf("pruned %d rows, want 1", n)
+	}
+}
+
+// Upgrading from schema v1 moves each host's single SMTP login into host_logins, keeps hosts
+// without a login open by address, and drops the old columns.
+func TestHostLoginsMigration(t *testing.T) {
+	raw, err := os.ReadFile("testdata/history/schema-v1.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "relay.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(raw) + `
+		INSERT INTO hosts(name, match, sender, created_at, smtp_user, smtp_pass_hash) VALUES('printer', '192.0.2.10', 'scan@contoso.com', 1, 'printer01', 'hash-1');
+		INSERT INTO hosts(name, match, sender, created_at, smtp_user, smtp_pass_hash) VALUES('app', '192.0.2.10, 192.0.2.11', 'app@contoso.com', 2, 'printer01', 'hash-2');
+		INSERT INTO hosts(name, match, sender, created_at) VALUES('nas', '192.0.2.20', 'nas@contoso.com', 3);
+		PRAGMA user_version = 1;`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	hosts, err := s.ListHosts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string][]Login{}
+	for _, h := range hosts {
+		got[h.Name] = h.Logins
+	}
+	// The same username on two hosts is kept: logins are unique per host only.
+	for name, hash := range map[string]string{"printer": "hash-1", "app": "hash-2"} {
+		if l := got[name]; len(l) != 1 || l[0].Username != "printer01" || l[0].PassHash != hash || l[0].Sender != "" {
+			t.Errorf("%s: logins %+v", name, l)
+		}
+	}
+	if len(got["nas"]) != 0 {
+		t.Errorf("nas got logins: %+v", got["nas"])
+	}
+}
+
+func TestSaveHostLogins(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	h := &Host{Name: "svydo", Match: "192.0.2.65", Sender: "hr@contoso.com", Enabled: true, Logins: []Login{
+		{Username: "planner", PassHash: "h1"},
+		{Username: "payroll", PassHash: "h2", Sender: "payroll@contoso.com"},
+	}}
+	if err := s.SaveHost(h); err != nil {
+		t.Fatal(err)
+	}
+	if h.Logins[0].ID == 0 || h.Logins[1].ID == 0 {
+		t.Fatalf("IDs not filled in: %+v", h.Logins)
+	}
+	g, _ := s.GetHost(h.ID)
+	if len(g.Logins) != 2 || g.SenderFor(&g.Logins[0]) != "payroll@contoso.com" || g.SenderFor(&g.Logins[1]) != "hr@contoso.com" ||
+		g.SenderFor(nil) != "hr@contoso.com" {
+		t.Fatalf("stored logins %+v", g.Logins)
+	}
+
+	// Edit: change one, drop the other, add a new one.
+	planner := g.Logins[1]
+	planner.PassHash = "h1b"
+	g.Logins = []Login{planner, {Username: "reports", PassHash: "h3"}}
+	if err := s.SaveHost(&g); err != nil {
+		t.Fatal(err)
+	}
+	g2, _ := s.GetHost(h.ID)
+	if len(g2.Logins) != 2 || g2.Logins[0].Username != "planner" || g2.Logins[0].PassHash != "h1b" ||
+		g2.Logins[0].ID != planner.ID || g2.Logins[1].Username != "reports" {
+		t.Fatalf("after edit: %+v", g2.Logins)
+	}
+
+	// The same username twice on one host is refused, and nothing of the failed save is kept.
+	g2.Logins = append(g2.Logins, Login{Username: "reports", PassHash: "x"})
+	g2.Name = "renamed"
+	if err := s.SaveHost(&g2); err == nil || !strings.Contains(err.Error(), "already has a login") {
+		t.Fatalf("duplicate username: %v", err)
+	}
+	if g3, _ := s.GetHost(h.ID); g3.Name != "svydo" || len(g3.Logins) != 2 {
+		t.Fatalf("failed save was partly applied: %+v", g3)
+	}
+
+	// Deleting the host deletes its logins.
+	if err := s.DeleteHost(h.ID); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	s.db.QueryRow(`SELECT count(*) FROM host_logins`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("%d logins left after deleting the host", n)
 	}
 }

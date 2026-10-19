@@ -20,18 +20,39 @@ type Host struct {
 	Name   string
 	Match  string
 	Sender string // mailbox used to send through Graph
-	// Optional SMTP AUTH. When SMTPUser is set, the client must also log in with these
-	// credentials (over TLS). SMTPPassHash is a bcrypt hash.
-	SMTPUser     string
-	SMTPPassHash string
-	RewriteFrom  bool // replace the From header address with Sender
-	Enabled      bool
-	Note         string
-	CreatedAt    time.Time
+	// Optional SMTP logins. A host with logins must match by address *and* log in with one of
+	// them (over TLS); a host without logins is allowed by its address alone.
+	Logins      []Login
+	RewriteFrom bool // replace the From header address with the sending mailbox
+	Enabled     bool
+	Note        string
+	CreatedAt   time.Time
+}
+
+// Login is one SMTP username and password of a host rule. Several logins on the same rule (or on
+// rules for the same address) let one machine send as different mailboxes depending on the login.
+type Login struct {
+	ID       int64
+	HostID   int64
+	Username string
+	PassHash string // bcrypt
+	Sender   string // mailbox for this login; empty = the host's mailbox
 }
 
 // Matches returns the individual entries of Match.
 func (h *Host) Matches() []string { return SplitMatch(h.Match) }
+
+// RequiresLogin reports whether clients of this host must log in.
+func (h *Host) RequiresLogin() bool { return len(h.Logins) > 0 }
+
+// SenderFor returns the mailbox a client of this host sends as: the login's own mailbox if it
+// has one, otherwise the host's. l may be nil (not logged in).
+func (h *Host) SenderFor(l *Login) string {
+	if l != nil && l.Sender != "" {
+		return l.Sender
+	}
+	return h.Sender
+}
 
 // SplitMatch splits a host match value into its entries. Commas, semicolons
 // and any whitespace separate entries.
@@ -242,13 +263,12 @@ func (s *Store) SetSetting(key, value string) error {
 
 // --- hosts ---
 
-const hostCols = `id, name, match, sender, rewrite_from, enabled, note, created_at, smtp_user, smtp_pass_hash`
+const hostCols = `id, name, match, sender, rewrite_from, enabled, note, created_at`
 
 func scanHost(sc interface{ Scan(...any) error }) (Host, error) {
 	var h Host
 	var created int64
-	err := sc.Scan(&h.ID, &h.Name, &h.Match, &h.Sender, &h.RewriteFrom, &h.Enabled, &h.Note, &created,
-		&h.SMTPUser, &h.SMTPPassHash)
+	err := sc.Scan(&h.ID, &h.Name, &h.Match, &h.Sender, &h.RewriteFrom, &h.Enabled, &h.Note, &created)
 	h.CreatedAt = time.Unix(created, 0)
 	return h, err
 }
@@ -258,16 +278,28 @@ func (s *Store) ListHosts() ([]Host, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var out []Host
 	for rows.Next() {
 		h, err := scanHost(rows)
 		if err != nil {
+			rows.Close()
 			return nil, err
 		}
 		out = append(out, h)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	logins, err := s.logins(`SELECT id, host_id, username, pass_hash, sender FROM host_logins ORDER BY username`)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].Logins = logins[out[i].ID]
+	}
+	return out, nil
 }
 
 func (s *Store) GetHost(id int64) (Host, error) {
@@ -275,24 +307,99 @@ func (s *Store) GetHost(id int64) (Host, error) {
 	if errors.Is(err, sql.ErrNoRows) {
 		return h, ErrNotFound
 	}
+	if err != nil {
+		return h, err
+	}
+	logins, err := s.logins(`SELECT id, host_id, username, pass_hash, sender FROM host_logins WHERE host_id = ? ORDER BY username`, id)
+	h.Logins = logins[id]
 	return h, err
 }
 
-func (s *Store) SaveHost(h *Host) error {
+// logins runs a host_logins query and groups the rows by host.
+func (s *Store) logins(query string, args ...any) (map[int64][]Login, error) {
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64][]Login{}
+	for rows.Next() {
+		var l Login
+		if err := rows.Scan(&l.ID, &l.HostID, &l.Username, &l.PassHash, &l.Sender); err != nil {
+			return nil, err
+		}
+		out[l.HostID] = append(out[l.HostID], l)
+	}
+	return out, rows.Err()
+}
+
+// SaveHost inserts or updates a host together with its logins: logins with ID 0 are added,
+// existing ones are updated, and logins of the host that are no longer in h.Logins are removed.
+// Everything happens in one transaction.
+func (s *Store) SaveHost(h *Host) (err error) {
+	// IDs assigned inside a transaction that is rolled back must not stick, or the next save of
+	// the same form would update rows that don't exist.
+	oldID, oldLogins := h.ID, slices.Clone(h.Logins)
+	defer func() {
+		if err != nil {
+			h.ID, h.Logins = oldID, oldLogins
+		}
+	}()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	if h.ID == 0 {
-		res, err := s.db.Exec(`INSERT INTO hosts(name, match, sender, rewrite_from, enabled, note, created_at,
-			smtp_user, smtp_pass_hash) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			h.Name, h.Match, h.Sender, h.RewriteFrom, h.Enabled, h.Note, time.Now().Unix(), h.SMTPUser, h.SMTPPassHash)
+		res, err := tx.Exec(`INSERT INTO hosts(name, match, sender, rewrite_from, enabled, note, created_at)
+			VALUES(?, ?, ?, ?, ?, ?, ?)`,
+			h.Name, h.Match, h.Sender, h.RewriteFrom, h.Enabled, h.Note, time.Now().Unix())
 		if err != nil {
 			return friendly(err)
 		}
-		h.ID, err = res.LastInsertId()
+		if h.ID, err = res.LastInsertId(); err != nil {
+			return err
+		}
+	} else if _, err := tx.Exec(`UPDATE hosts SET name = ?, match = ?, sender = ?, rewrite_from = ?, enabled = ?,
+		note = ? WHERE id = ?`, h.Name, h.Match, h.Sender, h.RewriteFrom, h.Enabled, h.Note, h.ID); err != nil {
+		return friendly(err)
+	}
+
+	keep := []any{h.ID}
+	marks := []string{}
+	for _, l := range h.Logins {
+		if l.ID != 0 {
+			keep = append(keep, l.ID)
+			marks = append(marks, "?")
+		}
+	}
+	del := `DELETE FROM host_logins WHERE host_id = ?`
+	if len(marks) > 0 {
+		del += ` AND id NOT IN (` + strings.Join(marks, ",") + `)`
+	}
+	if _, err := tx.Exec(del, keep...); err != nil {
 		return err
 	}
-	_, err := s.db.Exec(`UPDATE hosts SET name = ?, match = ?, sender = ?, rewrite_from = ?, enabled = ?, note = ?,
-		smtp_user = ?, smtp_pass_hash = ? WHERE id = ?`,
-		h.Name, h.Match, h.Sender, h.RewriteFrom, h.Enabled, h.Note, h.SMTPUser, h.SMTPPassHash, h.ID)
-	return friendly(err)
+	for i := range h.Logins {
+		l := &h.Logins[i]
+		l.HostID = h.ID
+		if l.ID == 0 {
+			res, err := tx.Exec(`INSERT INTO host_logins(host_id, username, pass_hash, sender, created_at)
+				VALUES(?, ?, ?, ?, ?)`, h.ID, l.Username, l.PassHash, l.Sender, time.Now().Unix())
+			if err != nil {
+				return friendly(err)
+			}
+			if l.ID, err = res.LastInsertId(); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := tx.Exec(`UPDATE host_logins SET username = ?, pass_hash = ?, sender = ? WHERE id = ? AND host_id = ?`,
+			l.Username, l.PassHash, l.Sender, l.ID, h.ID); err != nil {
+			return friendly(err)
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) DeleteHost(id int64) error {
@@ -301,8 +408,13 @@ func (s *Store) DeleteHost(id int64) error {
 }
 
 func friendly(err error) error {
-	if err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed: hosts.match") {
+	switch {
+	case err == nil:
+		return nil
+	case strings.Contains(err.Error(), "UNIQUE constraint failed: hosts.match"):
 		return errors.New("another host already uses this address / network / hostname")
+	case strings.Contains(err.Error(), "UNIQUE constraint failed: host_logins"):
+		return errors.New("this host already has a login with that username")
 	}
 	return err
 }

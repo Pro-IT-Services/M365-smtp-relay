@@ -61,11 +61,13 @@ type session struct {
 	port       string
 	requireTLS bool
 
-	host  *store.Host
-	from  string
-	rcpts []string
+	host   *store.Host
+	sender string // mailbox the current message is sent as (the login's or the host's)
+	from   string
+	rcpts  []string
 
-	authHostID int64 // host rule the client logged in for (0 = not logged in); survives RSET
+	// Host rule and login the client logged in with (0 = not logged in); survive RSET.
+	authHostID, authLoginID int64
 
 	info *connInfo // connection record; nil when the listener isn't tracked
 }
@@ -80,36 +82,46 @@ func (s *session) Mail(from string, _ *smtp.MailOptions) error {
 			return smtpErr(530, smtp.EnhancedCode{5, 7, 0}, "Must issue a STARTTLS command first")
 		}
 	}
-	host, err := s.relay.Matcher.Match(context.Background(), s.ip)
+	hosts, err := s.relay.Matcher.MatchAll(context.Background(), s.ip)
 	if err != nil {
 		s.relay.Log.Error("host lookup failed", "err", err)
 		return smtpErr(451, smtp.EnhancedCode{4, 3, 0}, "Temporary server error, try again later")
 	}
-	if host == nil {
+	if len(hosts) == 0 {
 		s.record(&store.LogEntry{EnvFrom: from, Status: "rejected", Error: "client IP not in allowed hosts"})
 		s.relay.Log.Warn("rejected unknown client", "ip", s.ip, "port", s.port, "from", from)
 		return smtpErr(554, smtp.EnhancedCode{5, 7, 1}, fmt.Sprintf("Relay access denied for %s", s.ip))
 	}
-	allowed, err := s.relay.Store.SenderAllowed(host.Sender)
+	// A logged-in client uses the rule and login it logged in with (if they still exist and still
+	// match); otherwise the most specific rule for its address applies.
+	host, login := &hosts[0], (*store.Login)(nil)
+	if s.authHostID != 0 {
+		host, login = loggedIn(hosts, s.authHostID, s.authLoginID)
+		if host == nil {
+			host = &hosts[0]
+		}
+	}
+	sender := host.SenderFor(login)
+	allowed, err := s.relay.Store.SenderAllowed(sender)
 	if err != nil {
 		s.relay.Log.Error("allowed senders lookup failed", "err", err)
 		return smtpErr(451, smtp.EnhancedCode{4, 3, 0}, "Temporary server error, try again later")
 	}
 	if !allowed {
 		s.record(&store.LogEntry{EnvFrom: from, Status: "rejected",
-			HostID: host.ID, HostName: host.Name, Sender: host.Sender,
-			Error: fmt.Sprintf("sender mailbox %s is not in the allowed list (Settings)", host.Sender)})
-		s.relay.Log.Warn("rejected: host's sender mailbox not allowed", "ip", s.ip, "host", host.Name, "sender", host.Sender)
+			HostID: host.ID, HostName: host.Name, Sender: sender,
+			Error: fmt.Sprintf("sender mailbox %s is not in the allowed list (Settings)", sender)})
+		s.relay.Log.Warn("rejected: host's sender mailbox not allowed", "ip", s.ip, "host", host.Name, "sender", sender)
 		return smtpErr(554, smtp.EnhancedCode{5, 7, 1}, "Sender mailbox for this host is not allowed")
 	}
-	if host.SMTPUser != "" && s.authHostID != host.ID {
+	if host.RequiresLogin() && login == nil {
 		s.record(&store.LogEntry{EnvFrom: from, Status: "rejected",
 			HostID: host.ID, HostName: host.Name, Sender: host.Sender,
 			Error: "SMTP login required for this host"})
 		s.relay.Log.Warn("rejected: login required", "ip", s.ip, "host", host.Name)
 		return smtpErr(530, smtp.EnhancedCode{5, 7, 0}, "Authentication required")
 	}
-	s.host = host
+	s.host, s.sender = host, sender
 	s.from = from
 	s.rcpts = nil
 	return nil
@@ -142,7 +154,7 @@ func (s *session) Data(r io.Reader) error {
 		s.record(entry)
 	}()
 
-	p, err := prepare(raw, s.rcpts, s.host.Sender, s.host.RewriteFrom)
+	p, err := prepare(raw, s.rcpts, s.sender, s.host.RewriteFrom)
 	if err != nil {
 		entry.Status, entry.Error = "rejected", err.Error()
 		return smtpErr(554, smtp.EnhancedCode{5, 6, 0}, "Message could not be parsed")
@@ -152,7 +164,7 @@ func (s *session) Data(r io.Reader) error {
 	ctx, cancel := context.WithTimeout(context.Background(), s.relay.SendTimeout)
 	defer cancel()
 	if len(p.raw) <= graph.MaxMIMEBytes {
-		err = s.relay.Graph.SendMIME(ctx, s.host.Sender, p.raw)
+		err = s.relay.Graph.SendMIME(ctx, s.sender, p.raw)
 	} else {
 		var gm *graph.Message
 		gm, err = toGraphMessage(p.raw)
@@ -160,18 +172,18 @@ func (s *session) Data(r io.Reader) error {
 			entry.Status, entry.Error = "rejected", "parse MIME: "+err.Error()
 			return smtpErr(554, smtp.EnhancedCode{5, 6, 0}, "Message could not be parsed")
 		}
-		err = s.relay.Graph.SendLarge(ctx, s.host.Sender, gm)
+		err = s.relay.Graph.SendLarge(ctx, s.sender, gm)
 	}
 	if err != nil {
 		entry.Status, entry.Error = "failed", err.Error()
-		s.relay.Log.Error("graph send failed", "host", s.host.Name, "mailbox", s.host.Sender, "err", err)
+		s.relay.Log.Error("graph send failed", "host", s.host.Name, "mailbox", s.sender, "err", err)
 		if graph.Temporary(err) {
 			return smtpErr(451, smtp.EnhancedCode{4, 4, 0}, "Upstream delivery failed temporarily, try again later")
 		}
 		return smtpErr(554, smtp.EnhancedCode{5, 0, 0}, "Upstream rejected the message: "+truncate(err.Error(), 200))
 	}
 	entry.Status = "sent"
-	s.relay.Log.Info("sent", "host", s.host.Name, "ip", s.ip, "mailbox", s.host.Sender,
+	s.relay.Log.Info("sent", "host", s.host.Name, "ip", s.ip, "mailbox", s.sender,
 		"rcpts", len(s.rcpts), "bytes", len(raw), "ms", time.Since(start).Milliseconds())
 	return nil
 }
@@ -185,7 +197,7 @@ func (s *session) record(e *store.LogEntry) {
 	}
 	e.Recipients = strings.Join(s.rcpts, ", ")
 	if s.host != nil {
-		e.HostID, e.HostName, e.Sender = s.host.ID, s.host.Name, s.host.Sender
+		e.HostID, e.HostName, e.Sender = s.host.ID, s.host.Name, s.sender
 	}
 	if err := s.relay.Store.AddLog(e); err != nil {
 		s.relay.Log.Error("write message log", "err", err)
@@ -208,10 +220,25 @@ func (s *session) record(e *store.LogEntry) {
 }
 
 func (s *session) Reset() {
-	s.host, s.from, s.rcpts = nil, "", nil
+	s.host, s.sender, s.from, s.rcpts = nil, "", "", nil
 }
 
 func (s *session) Logout() error { return nil }
+
+// loggedIn finds the rule and login a client logged in with among the rules matching its address.
+func loggedIn(hosts []store.Host, hostID, loginID int64) (*store.Host, *store.Login) {
+	for i := range hosts {
+		if hosts[i].ID != hostID {
+			continue
+		}
+		for j := range hosts[i].Logins {
+			if hosts[i].Logins[j].ID == loginID {
+				return &hosts[i], &hosts[i].Logins[j]
+			}
+		}
+	}
+	return nil, nil
+}
 
 // truncate shortens s for an SMTP reply line (which must not contain line breaks).
 func truncate(s string, n int) string {

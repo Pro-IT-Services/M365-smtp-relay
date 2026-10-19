@@ -13,7 +13,7 @@ your own. For how the code works, see [architecture.md](architecture.md).
 | 5 | TLS certificate: automatic via Cloudflare, or your own | Cloudflare, or your CA |
 | 6 | Download the release, configure, install, start | server |
 | 7 | First sign-in, mailboxes, host rules, test | portal |
-| 8 | Optional SMTP login per host | portal + device |
+| 8 | Optional SMTP logins per host | portal + device |
 | 9–11 | Break-glass login, maintenance, troubleshooting | |
 
 You need: Application Administrator (or Global Administrator) in Entra ID, Exchange Administrator, root on
@@ -434,12 +434,18 @@ Differences from a direct install:
 For each new sender mailbox: tag it (3a), add it under **Settings → Allowed sender mailboxes**, then pick it in
 a host rule.
 
-## 8. Optional SMTP login per host
+## 8. Optional SMTP logins per host
 
-In the host form, **SMTP login (optional)** takes a username and a password (**Generate** creates a random
-one; copy it now, it is stored only as a hash). With a login set, a client must come from the rule's address
-**and** log in; without a login it gets `530 Authentication required`. Leave both fields empty for devices
-that can't authenticate.
+In the host form, **SMTP logins (optional)** takes one or more logins, each a username and a password
+(**Generate** suggests a username or creates a random password; copy the password now, it is stored only as
+a hash). With logins set, a client must come from the rule's address **and** log in with one of them;
+without logging in it gets `530 Authentication required`. Leave the lines empty for devices that can't
+authenticate. **Add another login** adds a line; **Remove this login** deletes one.
+
+Each login can **send as its own mailbox** (or the host's). Use this when one machine sends for different
+purposes, for example an application server whose payroll module should send as `payroll@example.com` and
+whose planning module as `planning@example.com`: one host rule for the server's address, one login per
+module. The relay picks the mailbox by the login, even when several rules match the same address.
 
 Device settings: server `relay.example.com`, port **587 with STARTTLS** (or 25 with STARTTLS, or **465 with
 SSL/TLS**), authentication on, mechanism PLAIN or LOGIN. AUTH is only offered over TLS.

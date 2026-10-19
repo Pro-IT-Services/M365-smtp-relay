@@ -4,11 +4,22 @@ document.addEventListener("submit", (e) => {
   if (msg && !window.confirm(msg)) e.preventDefault();
 });
 
+// target returns the field a button acts on: with data-...="row" the named input in the same login
+// line, otherwise the element with that id.
+function target(button, value, name) {
+  if (value === "row") {
+    const row = button.closest(".login-row");
+    return row && row.querySelector("input[name=\"" + name + "\"]");
+  }
+  return document.getElementById(value);
+}
+
 // "Generate" buttons: fill the target password field with a random password and show it.
 document.addEventListener("click", (e) => {
   const id = e.target.dataset && e.target.dataset.generate;
   if (!id) return;
-  const field = document.getElementById(id);
+  const field = target(e.target, id, "login_pass");
+  if (!field) return;
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
   const bytes = crypto.getRandomValues(new Uint8Array(20));
   field.value = Array.from(bytes, (b) => chars[b % chars.length]).join("");
@@ -99,7 +110,8 @@ function suggestUsername(name, step) {
 document.addEventListener("click", (e) => {
   const id = e.target.dataset && e.target.dataset.generateUser;
   if (!id) return;
-  const field = document.getElementById(id);
+  const field = target(e.target, id, "login_user");
+  if (!field) return;
   const nameField = field.form && field.form.elements["name"];
   const name = nameField ? nameField.value : "";
   let step = Number(e.target.dataset.step || 0);
@@ -108,4 +120,25 @@ document.addEventListener("click", (e) => {
   e.target.dataset.step = step;
   field.value = value;
   field.select();
+});
+
+// "Add another login": copy the empty login line at the end of the list.
+document.addEventListener("click", (e) => {
+  if (!(e.target.dataset && "addLogin" in e.target.dataset)) return;
+  const rows = document.querySelectorAll("#logins .login-row");
+  const copy = rows[rows.length - 1].cloneNode(true);
+  copy.querySelectorAll("input").forEach((i) => {
+    if (i.name === "login_id") i.value = "0";
+    else if (i.type === "checkbox") i.closest("label").remove();
+    else {
+      i.value = "";
+      if (i.name === "login_pass") {
+        i.type = "password";
+        i.placeholder = "at least 12 characters";
+      }
+    }
+  });
+  copy.querySelectorAll("select").forEach((s) => (s.value = ""));
+  e.target.parentElement.before(copy);
+  copy.querySelector("input[name=\"login_user\"]").focus();
 });

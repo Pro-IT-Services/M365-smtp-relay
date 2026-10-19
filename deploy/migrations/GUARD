@@ -2,4 +2,4 @@
 # Do not edit by hand. See deploy/migrations/README.md, then run: bash deploy/migrations/guard.sh --update
 305bedd837d63ac599aee22c5056f81c8fea99c16ec0f2b02f4088a8d40b05f0  deploy/harden-host.sh
 f70ee443a1430a8efd9acb0d428e00c813cb2e120bf585af06a4a71e5bbece19  config.example.yaml
-f3ebdc65cd9015b7c66cf5654fc52472e100429889d19aaccd5f3603d9235a1b  internal/store/testdata/schema.golden
+c1d64b6ebeedc91e765d1ed5914526c293504790d2f082c6cca3203a021c7cac  internal/store/testdata/schema.golden
